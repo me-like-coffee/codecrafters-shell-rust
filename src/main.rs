@@ -21,12 +21,18 @@ fn main() {
                 // Prints the arguments passed to the "echo" command
                 println!("{}", args.join(" "));
             }
+            // Prints if the command is a shell buitlin, executable, or not found
+            "type" => match args.first() {
+                Some(&cmd) => match cmd {
+                    "exit" | "echo" | "type" => println!("{} is a shell builtin", cmd),
+                    _ => println!("{}: not found", cmd),
+                },
+                None => println!("type: missing argument"),
+            },
             _ => {
-                        // Prints the "<command>: command not found" message
-                    println!("{}: command not found", command.trim())
-
+                // Prints the "<command>: command not found" message
+                println!("{}: command not found", command)
             }
         }
-
     }
 }
