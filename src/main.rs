@@ -1,19 +1,16 @@
-#[allow(unused_imports)]
+// #[allow(unused_imports)]
 use std::io::{self, Write};
 
 use is_executable::IsExecutable;
 use std::env;
+use std::path::PathBuf;
+use std::process::Command;
 
-fn find_exe(name: &str) -> Option<String> {
-    if let Some(paths) = env::var_os("PATH") {
-        for path in env::split_paths(&paths) {
-            let p = path.join(name);
-            if p.is_executable() {
-                return Some(p.to_string_lossy().into_owned());
-            }
-        }
-    }
-    None
+fn find_exe_path(name: &str) -> Option<PathBuf> {
+    let paths = env::var_os("PATH")?;
+    env::split_paths(&paths)
+        .map(|dir| dir.join(name))
+        .find(|path| path.is_executable())
 }
 
 fn main() {
@@ -41,8 +38,8 @@ fn main() {
                 Some(&cmd) => match cmd {
                     "exit" | "echo" | "type" => println!("{} is a shell builtin", cmd),
                     _ => {
-                        if let Some(exe_path) = find_exe(cmd) {
-                            println!("{} is {}", cmd, exe_path);
+                        if let Some(exe_path) = find_exe_path(cmd) {
+                            println!("{} is {}", cmd, exe_path.to_str().unwrap());
                         } else {
                             println!("{}: not found", cmd);
                         }
@@ -51,8 +48,18 @@ fn main() {
                 None => println!("type: missing argument"),
             },
             _ => {
-                // Prints the "<command>: command not found" message
-                println!("{}: command not found", command)
+                // Tries to find the executable path of the command
+                if find_exe_path(command).is_some() {
+                    // Executes the command with the provided arguments
+                    let mut child = Command::new(command)
+                        .args(&args)
+                        .spawn()
+                        .expect("Failed to execute command");
+                    child.wait().expect("Failed to wait on child");
+                } else {
+                    // Prints the "<command>: command not found" message
+                    println!("{}: command not found", command);
+                }
             }
         }
     }
