@@ -36,7 +36,9 @@ fn main() {
             // Prints if the command is a shell buitlin, executable, or not found
             "type" => match args.first() {
                 Some(&cmd) => match cmd {
-                    "exit" | "echo" | "type" | "pwd" => println!("{} is a shell builtin", cmd),
+                    "exit" | "echo" | "type" | "pwd" | "cd" => {
+                        println!("{} is a shell builtin", cmd)
+                    }
                     _ => {
                         if let Some(exe_path) = find_exe_path(cmd) {
                             println!("{} is {}", cmd, exe_path.to_str().unwrap());
@@ -52,6 +54,16 @@ fn main() {
                 match env::current_dir() {
                     Ok(path) => println!("{}", path.display()),
                     Err(e) => eprintln!("Error getting current directory: {}", e),
+                }
+            }
+            "cd" => {
+                // Changes the current working directory to the specified path
+                if let Some(path) = args.first() {
+                    if env::set_current_dir(path).is_err() {
+                        println!("cd: {}: No such file or directory", path);
+                    }
+                } else {
+                    eprintln!("cd: missing argument");
                 }
             }
             _ => {
