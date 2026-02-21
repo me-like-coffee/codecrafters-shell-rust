@@ -53,17 +53,23 @@ fn main() {
                 // Prints the current working directory
                 match env::current_dir() {
                     Ok(path) => println!("{}", path.display()),
-                    Err(e) => eprintln!("Error getting current directory: {}", e),
+                    Err(e) => println!("Error getting current directory: {}", e),
                 }
             }
             "cd" => {
                 // Changes the current working directory to the specified path
-                if let Some(path) = args.first() {
-                    if env::set_current_dir(path).is_err() {
-                        println!("cd: {}: No such file or directory", path);
+                if let Some(path_str) = args.first() {
+                    // Handle '~' by replacing it with the home directory
+                    let target_path = if path_str == &"~" {
+                        dirs::home_dir().unwrap_or_else(|| std::path::PathBuf::from("."))
+                    } else {
+                        std::path::PathBuf::from(path_str)
+                    };
+                    if env::set_current_dir(&target_path).is_err() {
+                        println!("cd: {}: No such file or directory", path_str);
                     }
                 } else {
-                    eprintln!("cd: missing argument");
+                    println!("cd: missing argument");
                 }
             }
             _ => {
