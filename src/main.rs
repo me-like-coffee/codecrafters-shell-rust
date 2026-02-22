@@ -4,9 +4,9 @@ use anyhow::{Context, Result};
 use is_executable::IsExecutable;
 use std::env;
 use std::fs::{File, OpenOptions};
-use std::io::{self, Write};
+use std::io::{self, Read, Write};
 use std::path::PathBuf;
-use std::process::{Child, Command, Stdio};
+use std::process::{Command, Stdio};
 
 fn find_exe_path(name: &str) -> Option<PathBuf> {
     let paths = env::var_os("PATH")?;
@@ -19,14 +19,12 @@ fn is_builtin(cmd: &str) -> bool {
     matches!(cmd, "exit" | "echo" | "type" | "pwd" | "cd")
 }
 
-/// Represents a single command within a pipeline, including its redirections.
 struct CommandStage {
     tokens: Vec<String>,
     stdout_file: Option<File>,
     stderr_file: Option<File>,
 }
 
-/// Parses a stage's tokens to extract redirections.
 fn parse_stage(tokens: Vec<String>) -> Result<CommandStage> {
     let mut clean_args = Vec::new();
     let mut i = 0;
@@ -48,11 +46,9 @@ fn parse_stage(tokens: Vec<String>) -> Result<CommandStage> {
                 } else {
                     options.truncate(true);
                 }
-
                 let file = options
                     .open(filename)
                     .with_context(|| format!("failed to open file: {}", filename))?;
-
                 if is_stderr {
                     stderr_file = Some(file);
                 } else {
@@ -65,27 +61,11 @@ fn parse_stage(tokens: Vec<String>) -> Result<CommandStage> {
         clean_args.push(tokens[i].clone());
         i += 1;
     }
-
     Ok(CommandStage {
         tokens: clean_args,
         stdout_file,
         stderr_file,
     })
-}
-
-/// Spawns an external command as part of a pipeline.
-fn spawn_external(args: Vec<String>, stdin: Stdio, stdout: Stdio, stderr: Stdio) -> Result<Child> {
-    let mut token_iter = args.into_iter();
-    let command = token_iter.next().context("empty command stage")?;
-    let args: Vec<String> = token_iter.collect();
-
-    Command::new(command)
-        .args(args)
-        .stdin(stdin)
-        .stdout(stdout)
-        .stderr(stderr)
-        .spawn()
-        .context("failed to spawn command")
 }
 
 fn main() -> Result<()> {
@@ -113,7 +93,6 @@ fn main() -> Result<()> {
             continue;
         }
 
-        // 1. Split tokens by the pipe operator '|'
         let mut stages_tokens = Vec::new();
         let mut current_chunk = Vec::new();
         for token in tokens {
@@ -125,114 +104,168 @@ fn main() -> Result<()> {
         }
         stages_tokens.push(current_chunk);
 
-        // 2. Process redirections for each stage
         let mut stages = Vec::new();
         for st in stages_tokens {
             stages.push(parse_stage(st)?);
         }
 
-        // 3. Execution Logic
         if stages.len() == 1 {
-            // Single command logic (Builtin support)
-            let mut stage = stages.remove(0);
-            if stage.tokens.is_empty() {
-                continue;
-            }
-            let command = stage.tokens.remove(0);
-
-            if command == "exit" {
-                break;
-            }
-
-            if is_builtin(&command) {
-                let mut std_out = io::stdout();
-                let mut std_err = io::stderr();
-                let out: &mut dyn Write = match stage.stdout_file.as_mut() {
-                    Some(f) => f,
-                    None => &mut std_out,
-                };
-                let err: &mut dyn Write = match stage.stderr_file.as_mut() {
-                    Some(f) => f,
-                    None => &mut std_err,
-                };
-                if let Err(e) = run_builtin(&command, &stage.tokens, out, err) {
-                    eprintln!("{}: {:?}", command, e);
-                }
-            } else {
-                let stdout = stage
-                    .stdout_file
-                    .map(Stdio::from)
-                    .unwrap_or(Stdio::inherit());
-                let stderr = stage
-                    .stderr_file
-                    .map(Stdio::from)
-                    .unwrap_or(Stdio::inherit());
-                match spawn_external(
-                    std::iter::once(command.clone())
-                        .chain(stage.tokens)
-                        .collect(),
-                    Stdio::inherit(),
-                    stdout,
-                    stderr,
-                ) {
-                    Ok(mut child) => {
-                        child.wait().ok();
-                    }
-                    Err(_) => println!("{}: command not found", command),
-                }
+            match execute_single_stage(stages.remove(0)) {
+                Ok(_) => {}
+                Err(e) => eprintln!("{}", e),
             }
         } else if stages.len() == 2 {
-            // Two-stage pipeline (External commands only for now)
-            let stage1 = stages.remove(0);
-            let stage2 = stages.remove(0);
-
-            // Spawn Stage 1
-            let stdout1 = stage1
-                .stdout_file
-                .map(Stdio::from)
-                .unwrap_or(Stdio::piped());
-            let stderr1 = stage1
-                .stderr_file
-                .map(Stdio::from)
-                .unwrap_or(Stdio::inherit());
-
-            let mut child1 = match spawn_external(stage1.tokens, Stdio::inherit(), stdout1, stderr1)
-            {
-                Ok(c) => c,
-                Err(e) => {
-                    eprintln!("pipeline error: {}", e);
-                    continue;
-                }
-            };
-
-            // Take stdout of child1 to pass to child2
-            let pipe_in = child1.stdout.take().context("failed to open pipe")?;
-
-            // Spawn Stage 2
-            let stdin2 = Stdio::from(pipe_in);
-            let stdout2 = stage2
-                .stdout_file
-                .map(Stdio::from)
-                .unwrap_or(Stdio::inherit());
-            let stderr2 = stage2
-                .stderr_file
-                .map(Stdio::from)
-                .unwrap_or(Stdio::inherit());
-
-            let mut child2 = match spawn_external(stage2.tokens, stdin2, stdout2, stderr2) {
-                Ok(c) => c,
-                Err(e) => {
-                    eprintln!("pipeline error: {}", e);
-                    child1.kill().ok();
-                    continue;
-                }
-            };
-
-            // Wait for both to complete
-            child1.wait().ok();
-            child2.wait().ok();
+            execute_two_stage_pipeline(stages.remove(0), stages.remove(0))?;
         }
     }
+    Ok(())
+}
+
+fn execute_single_stage(mut stage: CommandStage) -> Result<()> {
+    if stage.tokens.is_empty() {
+        return Ok(());
+    }
+    let command = stage.tokens.remove(0);
+
+    if command == "exit" {
+        std::process::exit(0);
+    }
+
+    if is_builtin(&command) {
+        let mut std_out = io::stdout();
+        let mut std_err = io::stderr();
+        let out: &mut dyn Write = match stage.stdout_file.as_mut() {
+            Some(f) => f,
+            None => &mut std_out,
+        };
+        let err: &mut dyn Write = match stage.stderr_file.as_mut() {
+            Some(f) => f,
+            None => &mut std_err,
+        };
+        run_builtin(&command, &stage.tokens, out, err)?;
+    } else {
+        let stdout = stage
+            .stdout_file
+            .map(Stdio::from)
+            .unwrap_or(Stdio::inherit());
+        let stderr = stage
+            .stderr_file
+            .map(Stdio::from)
+            .unwrap_or(Stdio::inherit());
+        let mut child = Command::new(&command)
+            .args(&stage.tokens)
+            .stdout(stdout)
+            .stderr(stderr)
+            .spawn()
+            .map_err(|_| anyhow::anyhow!("{}: command not found", command))?;
+        child.wait()?;
+    }
+    Ok(())
+}
+
+fn execute_two_stage_pipeline(mut stage1: CommandStage, mut stage2: CommandStage) -> Result<()> {
+    let cmd1 = stage1.tokens.remove(0);
+    let cmd2 = stage2.tokens.remove(0);
+
+    // If Stage 2 is external, we can pipe directly into it.
+    // If Stage 2 is a builtin, we'll need to capture the output of Stage 1.
+    if !is_builtin(&cmd2) {
+        // Stage 2 is external
+        let mut child2_cmd = Command::new(&cmd2);
+        child2_cmd
+            .args(&stage2.tokens)
+            .stdin(Stdio::piped())
+            .stdout(
+                stage2
+                    .stdout_file
+                    .map(Stdio::from)
+                    .unwrap_or(Stdio::inherit()),
+            )
+            .stderr(
+                stage2
+                    .stderr_file
+                    .map(Stdio::from)
+                    .unwrap_or(Stdio::inherit()),
+            );
+
+        let mut child2 = child2_cmd.spawn().context("failed to spawn stage 2")?;
+        let mut pipe_to_child2 = child2.stdin.take().context("failed to open pipe")?;
+
+        if is_builtin(&cmd1) {
+            // Stage 1 (Builtin) -> Stage 2 (External)
+            let mut std_err = io::stderr();
+            let err: &mut dyn Write = match stage1.stderr_file.as_mut() {
+                Some(f) => f,
+                None => &mut std_err,
+            };
+            run_builtin(&cmd1, &stage1.tokens, &mut pipe_to_child2, err)?;
+            drop(pipe_to_child2); // Close pipe so child2 gets EOF
+        } else {
+            // Stage 1 (External) -> Stage 2 (External)
+            let mut child1 = Command::new(&cmd1)
+                .args(&stage1.tokens)
+                .stdout(Stdio::piped())
+                .stderr(
+                    stage1
+                        .stderr_file
+                        .map(Stdio::from)
+                        .unwrap_or(Stdio::inherit()),
+                )
+                .spawn()?;
+
+            let mut output1 = child1.stdout.take().context("failed to take stdout")?;
+            io::copy(&mut output1, &mut pipe_to_child2)?;
+            drop(pipe_to_child2);
+            child1.wait()?;
+        }
+        child2.wait()?;
+    } else {
+        // Stage 2 is a builtin (e.g., ls | type exit)
+        // Note: 'type' ignores stdin, but we still handle the pipe to be correct.
+        let mut output_from_stage1 = Vec::new();
+
+        if is_builtin(&cmd1) {
+            let mut std_err = io::stderr();
+            let err: &mut dyn Write = match stage1.stderr_file.as_mut() {
+                Some(f) => f,
+                None => &mut std_err,
+            };
+            run_builtin(&cmd1, &stage1.tokens, &mut output_from_stage1, err)?;
+        } else {
+            let mut child1 = Command::new(&cmd1)
+                .args(&stage1.tokens)
+                .stdout(Stdio::piped())
+                .stderr(
+                    stage1
+                        .stderr_file
+                        .map(Stdio::from)
+                        .unwrap_or(Stdio::inherit()),
+                )
+                .spawn()?;
+            child1
+                .stdout
+                .take()
+                .unwrap()
+                .read_to_end(&mut output_from_stage1)?;
+            child1.wait()?;
+        }
+
+        let mut std_out = io::stdout();
+        let mut std_err = io::stderr();
+        let out: &mut dyn Write = match stage2.stdout_file.as_mut() {
+            Some(f) => f,
+            None => &mut std_out,
+        };
+        let err: &mut dyn Write = match stage2.stderr_file.as_mut() {
+            Some(f) => f,
+            None => &mut std_err,
+        };
+
+        // Execute Stage 2 Builtin.
+        // Note: Builtins currently don't consume 'output_from_stage1'.
+        run_builtin(&cmd2, &stage2.tokens, out, err)?;
+    }
+
     Ok(())
 }
 
@@ -243,7 +276,11 @@ fn run_builtin(
     stderr: &mut dyn Write,
 ) -> Result<()> {
     match cmd {
-        "echo" => writeln!(stdout, "{}", args.join(" "))?,
+        "echo" => {
+            // Join arguments with a single space and add a trailing newline.
+            // Do NOT manually replace \n; the tokenizer already handled escaping.
+            writeln!(stdout, "{}", args.join(" "))?;
+        }
         "type" => match args.first() {
             Some(target) => {
                 if is_builtin(target) {
