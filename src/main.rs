@@ -18,11 +18,10 @@ fn find_exe_path(name: &str) -> Option<PathBuf> {
 
 /// Checks if a command is a known shell builtin.
 fn is_builtin(cmd: &str) -> bool {
-    matches!(cmd, "exit" | "echo" | "type" | "pwd" | "cd")
+    matches!(cmd, "exit" | "echo" | "type" | "pwd" | "cd" | "history")
 }
 
 /// Tracks where the input for the current stage is coming from.
-/// This prevents attempting to match on the opaque Stdio struct.
 enum InputSource {
     Terminal,
     Pipe(ChildStdout),
@@ -83,7 +82,6 @@ fn parse_stage(tokens: Vec<String>) -> Result<CommandStage> {
     })
 }
 
-/// Bridges data from a builtin's memory buffer into an OS pipe for external commands.
 fn create_pipe_from_data(data: Vec<u8>) -> Result<Stdio> {
     let mut child = Command::new("cat")
         .stdin(Stdio::piped())
@@ -99,7 +97,7 @@ fn create_pipe_from_data(data: Vec<u8>) -> Result<Stdio> {
     Ok(Stdio::from(child.stdout.take().unwrap()))
 }
 
-fn execute_pipeline(mut stages: Vec<CommandStage>) -> Result<()> {
+fn execute_pipeline(mut stages: Vec<CommandStage>, history: &[String]) -> Result<()> {
     let mut prev_input = InputSource::Terminal;
     let mut children: Vec<Child> = Vec::new();
     let n_stages = stages.len();
@@ -118,13 +116,11 @@ fn execute_pipeline(mut stages: Vec<CommandStage>) -> Result<()> {
                 std::process::exit(0);
             }
 
-            // Builtin Input Handling: If previous stage was external, drain it.
             if let InputSource::Pipe(mut pipe) = prev_input {
                 let mut discard = Vec::new();
                 let _ = pipe.read_to_end(&mut discard);
             }
 
-            // Builtin Execution
             let mut builtin_out = Vec::new();
             let mut std_err = io::stderr();
             let err_writer: &mut dyn Write = match stage.stderr_file.as_mut() {
@@ -132,9 +128,14 @@ fn execute_pipeline(mut stages: Vec<CommandStage>) -> Result<()> {
                 None => &mut std_err,
             };
 
-            run_builtin(&command, &stage.tokens, &mut builtin_out, err_writer)?;
+            run_builtin(
+                &command,
+                &stage.tokens,
+                &mut builtin_out,
+                err_writer,
+                history,
+            )?;
 
-            // Builtin Output Handling
             if is_last {
                 if let Some(mut f) = stage.stdout_file {
                     f.write_all(&builtin_out)?;
@@ -146,11 +147,9 @@ fn execute_pipeline(mut stages: Vec<CommandStage>) -> Result<()> {
                 prev_input = InputSource::Buffer(builtin_out);
             }
         } else {
-            // External Command Execution
             let mut cmd = Command::new(&command);
             cmd.args(&stage.tokens);
 
-            // Set Stdin
             match prev_input {
                 InputSource::Terminal => {
                     cmd.stdin(Stdio::inherit());
@@ -163,7 +162,6 @@ fn execute_pipeline(mut stages: Vec<CommandStage>) -> Result<()> {
                 }
             }
 
-            // Set Stdout
             if is_last {
                 let out = stage
                     .stdout_file
@@ -174,7 +172,6 @@ fn execute_pipeline(mut stages: Vec<CommandStage>) -> Result<()> {
                 cmd.stdout(Stdio::piped());
             }
 
-            // Set Stderr
             cmd.stderr(
                 stage
                     .stderr_file
@@ -196,7 +193,6 @@ fn execute_pipeline(mut stages: Vec<CommandStage>) -> Result<()> {
         }
     }
 
-    // Wait for all spawned processes
     for mut child in children {
         let _ = child.wait();
     }
@@ -209,6 +205,7 @@ fn run_builtin(
     args: &[String],
     stdout: &mut dyn Write,
     stderr: &mut dyn Write,
+    history: &[String],
 ) -> Result<()> {
     match cmd {
         "echo" => {
@@ -226,6 +223,12 @@ fn run_builtin(
             }
             None => writeln!(stderr, "type: missing argument")?,
         },
+        "history" => {
+            for (i, entry) in history.iter().enumerate() {
+                // Formatting indices with right-alignment (e.g., width of 5)
+                writeln!(stdout, "{:>5}  {}", i + 1, entry)?;
+            }
+        }
         "pwd" => {
             let path = env::current_dir().context("failed to get current directory")?;
             writeln!(stdout, "{}", path.display())?;
@@ -247,6 +250,8 @@ fn run_builtin(
 }
 
 fn main() -> Result<()> {
+    let mut history_list = Vec::new();
+
     loop {
         print!("$ ");
         io::stdout().flush().context("failed to flush stdout")?;
@@ -260,6 +265,14 @@ fn main() -> Result<()> {
             break;
         }
 
+        let trimmed_input = input.trim();
+        if trimmed_input.is_empty() {
+            continue;
+        }
+
+        // Add to history before tokenization
+        history_list.push(trimmed_input.to_string());
+
         let tokens = match parser::tokenize(&input) {
             Ok(t) => t,
             Err(e) => {
@@ -268,11 +281,6 @@ fn main() -> Result<()> {
             }
         };
 
-        if tokens.is_empty() {
-            continue;
-        }
-
-        // Split tokens into stages by the pipe operator
         let mut stages_tokens = Vec::new();
         let mut current_chunk = Vec::new();
         for token in tokens {
@@ -284,13 +292,12 @@ fn main() -> Result<()> {
         }
         stages_tokens.push(current_chunk);
 
-        // Convert token chunks into CommandStage structs
         let mut stages = Vec::new();
         for st in stages_tokens {
             stages.push(parse_stage(st)?);
         }
 
-        if let Err(e) = execute_pipeline(stages) {
+        if let Err(e) = execute_pipeline(stages, &history_list) {
             eprintln!("{}", e);
         }
     }
