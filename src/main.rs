@@ -1,11 +1,11 @@
-// #[allow(unused_imports)]
-use std::io::{self, Write};
-
+use anyhow::{Context, Result};
 use is_executable::IsExecutable;
 use std::env;
+use std::io::{self, Write};
 use std::path::PathBuf;
 use std::process::Command;
 
+/// Searches the system PATH for an executable.
 fn find_exe_path(name: &str) -> Option<PathBuf> {
     let paths = env::var_os("PATH")?;
     env::split_paths(&paths)
@@ -13,79 +13,108 @@ fn find_exe_path(name: &str) -> Option<PathBuf> {
         .find(|path| path.is_executable())
 }
 
-fn main() {
-    loop {
-        // TODO: Uncomment the code below to pass the first stage
-        print!("$ ");
-        io::stdout().flush().unwrap();
+/// Checks if a command is a known shell builtin.
+fn is_builtin(cmd: &str) -> bool {
+    matches!(cmd, "exit" | "echo" | "type" | "pwd" | "cd")
+}
 
-        // Captures the user's command in the "command" variable
-        let mut command = String::new();
-        io::stdin().read_line(&mut command).unwrap();
-
-        let mut command_and_args = command.split_whitespace();
-        let command = command_and_args.next().unwrap_or("");
-        let args: Vec<&str> = command_and_args.collect();
-
-        match command {
-            "exit" => break, // Exits the shell if the user types "exit"
-            "echo" => {
-                // Prints the arguments passed to the "echo" command
-                println!("{}", args.join(" "));
-            }
-            // Prints if the command is a shell buitlin, executable, or not found
-            "type" => match args.first() {
-                Some(&cmd) => match cmd {
-                    "exit" | "echo" | "type" | "pwd" | "cd" => {
-                        println!("{} is a shell builtin", cmd)
-                    }
-                    _ => {
-                        if let Some(exe_path) = find_exe_path(cmd) {
-                            println!("{} is {}", cmd, exe_path.to_str().unwrap());
-                        } else {
-                            println!("{}: not found", cmd);
-                        }
-                    }
-                },
-                None => println!("type: missing argument"),
-            },
-            "pwd" => {
-                // Prints the current working directory
-                match env::current_dir() {
-                    Ok(path) => println!("{}", path.display()),
-                    Err(e) => println!("Error getting current directory: {}", e),
-                }
-            }
-            "cd" => {
-                // Changes the current working directory to the specified path
-                if let Some(path_str) = args.first() {
-                    // Handle '~' by replacing it with the home directory
-                    let target_path = if path_str == &"~" {
-                        dirs::home_dir().unwrap_or_else(|| std::path::PathBuf::from("."))
-                    } else {
-                        std::path::PathBuf::from(path_str)
-                    };
-                    if env::set_current_dir(&target_path).is_err() {
-                        println!("cd: {}: No such file or directory", path_str);
-                    }
+/// Handles builtin commands. Returns Result to allow for anyhow context.
+fn run_builtin(cmd: &str, args: &[&str], writer: &mut dyn Write) -> Result<()> {
+    match cmd {
+        "echo" => {
+            writeln!(writer, "{}", args.join(" "))?;
+        }
+        "type" => match args.first() {
+            Some(&target) => {
+                if is_builtin(target) {
+                    writeln!(writer, "{} is a shell builtin", target)?;
+                } else if let Some(exe_path) = find_exe_path(target) {
+                    writeln!(writer, "{} is {}", target, exe_path.display())?;
                 } else {
-                    println!("cd: missing argument");
+                    writeln!(writer, "{}: not found", target)?;
                 }
             }
-            _ => {
-                // Tries to find the executable path of the command
-                if find_exe_path(command).is_some() {
-                    // Executes the command with the provided arguments
-                    let mut child = Command::new(command)
-                        .args(&args)
-                        .spawn()
-                        .expect("Failed to execute command");
-                    child.wait().expect("Failed to wait on child");
-                } else {
-                    // Prints the "<command>: command not found" message
-                    println!("{}: command not found", command);
-                }
+            None => writeln!(writer, "type: missing argument")?,
+        },
+        "pwd" => {
+            let path = env::current_dir().context("failed to get current directory")?;
+            writeln!(writer, "{}", path.display())?;
+        }
+        "cd" => {
+            let target = args.first().copied().unwrap_or("~");
+            let target_path = if target == "~" {
+                dirs::home_dir().context("could not find home directory")?
+            } else {
+                PathBuf::from(target)
+            };
+
+            if env::set_current_dir(&target_path).is_err() {
+                writeln!(writer, "cd: {}: No such file or directory", target)?;
             }
         }
+        _ => unreachable!(),
     }
+    Ok(())
+}
+
+/// Handles external command execution.
+fn run_external(cmd: &str, args: &[&str]) -> Result<()> {
+    let _ = Command::new(cmd)
+        .args(args)
+        .spawn()
+        .context("failed to spawn command")?
+        .wait()
+        .context("failed to wait for command")?;
+
+    Ok(())
+}
+
+fn main() -> Result<()> {
+    loop {
+        print!("$ ");
+        io::stdout().flush().context("failed to flush stdout")?;
+
+        let mut input = String::new();
+        let bytes_read = io::stdin()
+            .read_line(&mut input)
+            .context("failed to read from stdin")?;
+
+        // Exit on EOF (Ctrl+D)
+        if bytes_read == 0 {
+            break;
+        }
+
+        let mut parts = input.split_whitespace();
+        let command = match parts.next() {
+            Some(cmd) => cmd,
+            None => continue,
+        };
+        let args: Vec<&str> = parts.collect();
+
+        // Handle 'exit' immediately to break the loop
+        if command == "exit" {
+            break;
+        }
+
+        let result = if is_builtin(command) {
+            run_builtin(command, &args, &mut io::stdout())
+        } else {
+            run_external(command, &args)
+        };
+
+        // Catch and report recoverable errors
+        if let Err(e) = result {
+            // Check if it's a "command not found" style error
+            if let Some(io_err) = e.downcast_ref::<io::Error>()
+                && io_err.kind() == io::ErrorKind::NotFound
+            {
+                println!("{}: command not found", command);
+                continue;
+            }
+            // Print other errors with their context
+            eprintln!("{}: {:?}", command, e);
+        }
+    }
+
+    Ok(())
 }
