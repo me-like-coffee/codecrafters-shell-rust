@@ -3,7 +3,7 @@ mod parser;
 use anyhow::{Context, Result};
 use is_executable::IsExecutable;
 use std::env;
-use std::fs::File;
+use std::fs::{File, OpenOptions};
 use std::io::{self, Write};
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
@@ -21,8 +21,7 @@ fn is_builtin(cmd: &str) -> bool {
     matches!(cmd, "exit" | "echo" | "type" | "pwd" | "cd")
 }
 
-/// Extracts redirection operators for stdout (1>) and stderr (2>) from tokens.
-/// Returns (cleaned_args, stdout_file, stderr_file).
+/// Extracts redirection operators (>, 1>, 2>, >>, 1>>, 2>>) from tokens.
 fn process_redirection(tokens: Vec<String>) -> Result<(Vec<String>, Option<File>, Option<File>)> {
     let mut clean_args = Vec::new();
     let mut i = 0;
@@ -31,19 +30,35 @@ fn process_redirection(tokens: Vec<String>) -> Result<(Vec<String>, Option<File>
 
     while i < tokens.len() {
         let token = &tokens[i];
-        if token == ">" || token == "1>" || token == "2>" {
-            if let Some(filename) = tokens.get(i + 1) {
-                // File::create truncates existing files and creates new ones
-                let file = File::create(filename)
-                    .with_context(|| format!("failed to create file: {}", filename))?;
 
-                if token == "2>" {
+        // Determine the type of redirection
+        let is_stdout = matches!(token.as_str(), ">" | "1>" | ">>" | "1>>");
+        let is_stderr = matches!(token.as_str(), "2>" | "2>>");
+        let is_append = matches!(token.as_str(), ">>" | "1>>" | "2>>");
+
+        if is_stdout || is_stderr {
+            if let Some(filename) = tokens.get(i + 1) {
+                // Configure OpenOptions based on append vs overwrite
+                let mut options = OpenOptions::new();
+                options.write(true).create(true);
+
+                if is_append {
+                    options.append(true);
+                } else {
+                    options.truncate(true);
+                }
+
+                let file = options
+                    .open(filename)
+                    .with_context(|| format!("failed to open file: {}", filename))?;
+
+                if is_stderr {
                     stderr_file = Some(file);
                 } else {
                     stdout_file = Some(file);
                 }
 
-                i += 2; // Skip operator and filename
+                i += 2;
                 continue;
             }
         }
@@ -156,7 +171,8 @@ fn main() -> Result<()> {
         }
 
         // Process redirection operators
-        let (mut clean_tokens, mut stdout_file, mut stderr_file) = match process_redirection(tokens) {
+        let (mut clean_tokens, mut stdout_file, mut stderr_file) = match process_redirection(tokens)
+        {
             Ok(res) => res,
             Err(e) => {
                 eprintln!("{}", e);
@@ -198,11 +214,11 @@ fn main() -> Result<()> {
         // 4. Handle Execution Errors
         if let Err(e) = result {
             // Check specifically for "Not Found" to print standard shell error
-            if let Some(io_err) = e.downcast_ref::<io::Error>() {
-                if io_err.kind() == io::ErrorKind::NotFound {
-                    println!("{}: command not found", command);
-                    continue;
-                }
+            if let Some(io_err) = e.downcast_ref::<io::Error>()
+                && io_err.kind() == io::ErrorKind::NotFound
+            {
+                println!("{}: command not found", command);
+                continue;
             }
             // Report all other fatal/contextual errors
             eprintln!("{}: {:?}", command, e);
