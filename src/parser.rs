@@ -2,14 +2,13 @@ use nom::{
     IResult, Parser,
     branch::alt,
     bytes::complete::{is_not, take_while},
-    character::complete::{char, multispace0, multispace1},
+    character::complete::{anychar, char, multispace0, multispace1},
     combinator::{all_consuming, map},
     multi::{many1, separated_list0},
-    sequence::delimited,
+    sequence::{delimited, preceded},
 };
 
 /// Parses content inside single quotes: '...'
-/// Everything inside is literal.
 fn parse_single_quoted(input: &str) -> IResult<&str, String> {
     delimited(
         char('\''),
@@ -20,7 +19,6 @@ fn parse_single_quoted(input: &str) -> IResult<&str, String> {
 }
 
 /// Parses content inside double quotes: "..."
-/// For now, handles literals (preserves spaces and single quotes).
 fn parse_double_quoted(input: &str) -> IResult<&str, String> {
     delimited(
         char('"'),
@@ -30,17 +28,28 @@ fn parse_double_quoted(input: &str) -> IResult<&str, String> {
     .parse(input)
 }
 
-/// Parses a plain string fragment (no quotes, no whitespace)
-fn parse_plain(input: &str) -> IResult<&str, String> {
-    // We stop at whitespace, single quotes, or double quotes
-    map(is_not(" \t\r\n'\""), String::from).parse(input)
+/// Parses a backslash followed by any character outside of quotes.
+/// Returns the escaped character as a literal string.
+fn parse_escaped_outside_quotes(input: &str) -> IResult<&str, String> {
+    preceded(char('\\'), map(anychar, String::from)).parse(input)
 }
 
-/// A "word" is one or more fragments (single-quoted, double-quoted, or plain)
-/// concatenated together. Handles "hello"'world' -> helloworld
+/// Parses a plain string fragment (no quotes, no whitespace, no backslash)
+fn parse_plain(input: &str) -> IResult<&str, String> {
+    // We stop at whitespace, single quotes, double quotes, or backslashes
+    map(is_not(" \t\r\n'\"\\"), String::from).parse(input)
+}
+
+/// A "word" is one or more fragments concatenated together.
+/// Fragments can be single-quoted, double-quoted, escaped, or plain.
 fn parse_word(input: &str) -> IResult<&str, String> {
     map(
-        many1(alt((parse_single_quoted, parse_double_quoted, parse_plain))),
+        many1(alt((
+            parse_single_quoted,
+            parse_double_quoted,
+            parse_escaped_outside_quotes,
+            parse_plain,
+        ))),
         |parts| parts.join(""),
     )
     .parse(input)
@@ -69,37 +78,44 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_double_quotes_preserve_spaces() {
-        let input = "echo \"hello    world\"";
+    fn test_backslash_spaces() {
+        let input = "echo three\\ \\ \\ spaces";
         let tokens = tokenize(input).unwrap();
-        assert_eq!(tokens, vec!["echo", "hello    world"]);
+        assert_eq!(tokens, vec!["echo", "three   spaces"]);
     }
 
     #[test]
-    fn test_concatenation() {
-        let input = "echo \"hello\"\"world\"";
+    fn test_backslash_preserves_first_space() {
+        let input = "echo before\\     after";
         let tokens = tokenize(input).unwrap();
-        assert_eq!(tokens, vec!["echo", "helloworld"]);
+        assert_eq!(tokens, vec!["echo", "before ", "after"]);
     }
 
     #[test]
-    fn test_separate_arguments() {
-        let input = "echo \"hello\" \"world\"";
+    fn test_backslash_no_special_meaning() {
+        let input = "echo test\\nexample";
         let tokens = tokenize(input).unwrap();
-        assert_eq!(tokens, vec!["echo", "hello", "world"]);
+        assert_eq!(tokens, vec!["echo", "testnexample"]);
     }
 
     #[test]
-    fn test_single_inside_double() {
-        let input = "echo \"shell's test\"";
+    fn test_backslash_backslash() {
+        let input = "echo hello\\\\world";
         let tokens = tokenize(input).unwrap();
-        assert_eq!(tokens, vec!["echo", "shell's test"]);
+        assert_eq!(tokens, vec!["echo", "hello\\world"]);
     }
 
     #[test]
-    fn test_mixed_concatenation() {
-        let input = "echo 'single'\"double\"plain";
+    fn test_backslash_quotes() {
+        let input = "echo \\'hello\\'";
         let tokens = tokenize(input).unwrap();
-        assert_eq!(tokens, vec!["echo", "singledoubleplain"]);
+        assert_eq!(tokens, vec!["echo", "'hello'"]);
+    }
+
+    #[test]
+    fn test_mixed_quoted_and_escaped() {
+        let input = "echo \"hello\"\\ world'!'";
+        let tokens = tokenize(input).unwrap();
+        assert_eq!(tokens, vec!["echo", "hello world!"]);
     }
 }
