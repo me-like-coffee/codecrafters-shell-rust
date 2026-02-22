@@ -16,24 +16,33 @@ fn find_exe_path(name: &str) -> Option<PathBuf> {
         .find(|path| path.is_executable())
 }
 
+/// Checks if a command is a known shell builtin.
 fn is_builtin(cmd: &str) -> bool {
     matches!(cmd, "exit" | "echo" | "type" | "pwd" | "cd")
 }
 
-/// Helper to identify and extract redirection from tokens.
-/// Returns (remaining_args, optional_file_handle)
-fn process_redirection(tokens: Vec<String>) -> Result<(Vec<String>, Option<File>)> {
+/// Extracts redirection operators for stdout (1>) and stderr (2>) from tokens.
+/// Returns (cleaned_args, stdout_file, stderr_file).
+fn process_redirection(tokens: Vec<String>) -> Result<(Vec<String>, Option<File>, Option<File>)> {
     let mut clean_args = Vec::new();
     let mut i = 0;
-    let mut file_handle = None;
+    let mut stdout_file = None;
+    let mut stderr_file = None;
 
     while i < tokens.len() {
-        if tokens[i] == ">" || tokens[i] == "1>" {
+        let token = &tokens[i];
+        if token == ">" || token == "1>" || token == "2>" {
             if let Some(filename) = tokens.get(i + 1) {
-                // Open file: Create if missing, truncate if exists.
+                // File::create truncates existing files and creates new ones
                 let file = File::create(filename)
                     .with_context(|| format!("failed to create file: {}", filename))?;
-                file_handle = Some(file);
+
+                if token == "2>" {
+                    stderr_file = Some(file);
+                } else {
+                    stdout_file = Some(file);
+                }
+
                 i += 2; // Skip operator and filename
                 continue;
             }
@@ -42,29 +51,35 @@ fn process_redirection(tokens: Vec<String>) -> Result<(Vec<String>, Option<File>
         i += 1;
     }
 
-    Ok((clean_args, file_handle))
+    Ok((clean_args, stdout_file, stderr_file))
 }
 
-fn run_builtin(cmd: &str, args: &[String], writer: &mut dyn Write) -> Result<()> {
+/// Handles builtin commands with redirected writers.
+fn run_builtin(
+    cmd: &str,
+    args: &[String],
+    stdout: &mut dyn Write,
+    stderr: &mut dyn Write,
+) -> Result<()> {
     match cmd {
         "echo" => {
-            writeln!(writer, "{}", args.join(" "))?;
+            writeln!(stdout, "{}", args.join(" "))?;
         }
         "type" => match args.first() {
             Some(target) => {
                 if is_builtin(target) {
-                    writeln!(writer, "{} is a shell builtin", target)?;
+                    writeln!(stdout, "{} is a shell builtin", target)?;
                 } else if let Some(exe_path) = find_exe_path(target) {
-                    writeln!(writer, "{} is {}", target, exe_path.display())?;
+                    writeln!(stdout, "{} is {}", target, exe_path.display())?;
                 } else {
-                    writeln!(writer, "{}: not found", target)?;
+                    writeln!(stdout, "{}: not found", target)?;
                 }
             }
-            None => writeln!(writer, "type: missing argument")?,
+            None => writeln!(stderr, "type: missing argument")?,
         },
         "pwd" => {
             let path = env::current_dir().context("failed to get current directory")?;
-            writeln!(writer, "{}", path.display())?;
+            writeln!(stdout, "{}", path.display())?;
         }
         "cd" => {
             let target = args.first().map(|s| s.as_str()).unwrap_or("~");
@@ -73,8 +88,9 @@ fn run_builtin(cmd: &str, args: &[String], writer: &mut dyn Write) -> Result<()>
             } else {
                 PathBuf::from(target)
             };
+
             if env::set_current_dir(&target_path).is_err() {
-                writeln!(writer, "cd: {}: No such file or directory", target)?;
+                writeln!(stderr, "cd: {}: No such file or directory", target)?;
             }
         }
         _ => unreachable!(),
@@ -82,13 +98,21 @@ fn run_builtin(cmd: &str, args: &[String], writer: &mut dyn Write) -> Result<()>
     Ok(())
 }
 
-fn run_external(cmd: &str, args: &[String], stdout_file: Option<File>) -> Result<()> {
+/// Handles external command execution with redirected stdio.
+fn run_external(
+    cmd: &str,
+    args: &[String],
+    stdout_file: Option<File>,
+    stderr_file: Option<File>,
+) -> Result<()> {
     let mut command = Command::new(cmd);
     command.args(args);
 
-    // Redirect stdout if a file was provided
     if let Some(file) = stdout_file {
         command.stdout(Stdio::from(file));
+    }
+    if let Some(file) = stderr_file {
+        command.stderr(Stdio::from(file));
     }
 
     let status = command
@@ -98,7 +122,7 @@ fn run_external(cmd: &str, args: &[String], stdout_file: Option<File>) -> Result
         .context("failed to wait for command")?;
 
     if !status.success() {
-        // Child exit code does not affect shell loop
+        // Child exit code is ignored by the shell REPL
     }
     Ok(())
 }
@@ -109,10 +133,16 @@ fn main() -> Result<()> {
         io::stdout().flush().context("failed to flush stdout")?;
 
         let mut input = String::new();
-        if io::stdin().read_line(&mut input).context("failed to read from stdin")? == 0 {
+        if io::stdin()
+            .read_line(&mut input)
+            .context("failed to read from stdin")?
+            == 0
+        {
+            // Exit on EOF (Ctrl+D)
             break;
         }
 
+        // Tokenize input using modular nom parser
         let tokens = match parser::tokenize(&input) {
             Ok(t) => t,
             Err(e) => {
@@ -125,8 +155,8 @@ fn main() -> Result<()> {
             continue;
         }
 
-        // Handle redirection BEFORE identifying the command
-        let (mut clean_tokens, stdout_file) = match process_redirection(tokens) {
+        // Process redirection operators
+        let (mut clean_tokens, mut stdout_file, mut stderr_file) = match process_redirection(tokens) {
             Ok(res) => res,
             Err(e) => {
                 eprintln!("{}", e);
@@ -145,25 +175,39 @@ fn main() -> Result<()> {
             break;
         }
 
+        // Dispatch to Builtin or External command
         let result = if is_builtin(&command) {
-            // For builtins, if we have a file, use it as the writer. 
-            // Otherwise, use stdout.
-            if let Some(mut file) = stdout_file {
-                run_builtin(&command, &args, &mut file)
-            } else {
-                run_builtin(&command, &args, &mut io::stdout())
-            }
+            // Shadowing standard streams to facilitate redirection
+            let mut std_out = io::stdout();
+            let mut std_err = io::stderr();
+
+            let out_writer: &mut dyn Write = match stdout_file.as_mut() {
+                Some(f) => &mut *f,
+                None => &mut std_out,
+            };
+            let err_writer: &mut dyn Write = match stderr_file.as_mut() {
+                Some(f) => &mut *f,
+                None => &mut std_err,
+            };
+
+            run_builtin(&command, &args, out_writer, err_writer)
         } else {
-            run_external(&command, &args, stdout_file)
+            run_external(&command, &args, stdout_file, stderr_file)
         };
 
+        // 4. Handle Execution Errors
         if let Err(e) = result {
-            if let Some(io_err) = e.downcast_ref::<io::Error>() && io_err.kind() == io::ErrorKind::NotFound {
+            // Check specifically for "Not Found" to print standard shell error
+            if let Some(io_err) = e.downcast_ref::<io::Error>() {
+                if io_err.kind() == io::ErrorKind::NotFound {
                     println!("{}: command not found", command);
                     continue;
+                }
             }
+            // Report all other fatal/contextual errors
             eprintln!("{}: {:?}", command, e);
         }
     }
+
     Ok(())
 }
