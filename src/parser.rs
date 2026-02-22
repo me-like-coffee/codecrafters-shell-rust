@@ -2,13 +2,14 @@ use nom::{
     IResult, Parser,
     branch::alt,
     bytes::complete::{is_not, take_while},
-    character::complete::{anychar, char, multispace0, multispace1},
+    character::complete::{anychar, char, multispace0, multispace1, one_of},
     combinator::{all_consuming, map},
-    multi::{many1, separated_list0},
-    sequence::{delimited, preceded},
+    multi::{many0, many1, separated_list0},
+    sequence::{delimited, pair, preceded},
 };
 
 /// Parses content inside single quotes: '...'
+/// Everything inside is strictly literal until the closing quote.
 fn parse_single_quoted(input: &str) -> IResult<&str, String> {
     delimited(
         char('\''),
@@ -19,24 +20,37 @@ fn parse_single_quoted(input: &str) -> IResult<&str, String> {
 }
 
 /// Parses content inside double quotes: "..."
+/// Within double quotes, \ only escapes: ", \, $, `, and newline.
 fn parse_double_quoted(input: &str) -> IResult<&str, String> {
     delimited(
         char('"'),
-        map(take_while(|c| c != '"'), String::from),
+        map(
+            many0(alt((
+                // Handle special escapes: \" or \\ (and eventually $, `, \n)
+                // We consume both but only return the second character
+                map(pair(char('\\'), one_of("\"\\$`\n")), |(_, c)| c.to_string()),
+                // Handle a backslash followed by any other character
+                // The backslash remains literal
+                map(pair(char('\\'), anychar), |(slash, c)| {
+                    format!("{}{}", slash, c)
+                }),
+                // Handle any character that is NOT a quote or a backslash
+                map(is_not("\"\\"), String::from),
+            ))),
+            |parts| parts.join(""),
+        ),
         char('"'),
     )
     .parse(input)
 }
 
 /// Parses a backslash followed by any character outside of quotes.
-/// Returns the escaped character as a literal string.
 fn parse_escaped_outside_quotes(input: &str) -> IResult<&str, String> {
     preceded(char('\\'), map(anychar, String::from)).parse(input)
 }
 
 /// Parses a plain string fragment (no quotes, no whitespace, no backslash)
 fn parse_plain(input: &str) -> IResult<&str, String> {
-    // We stop at whitespace, single quotes, double quotes, or backslashes
     map(is_not(" \t\r\n'\"\\"), String::from).parse(input)
 }
 
@@ -78,44 +92,89 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_backslash_spaces() {
-        let input = "echo three\\ \\ \\ spaces";
-        let tokens = tokenize(input).unwrap();
-        assert_eq!(tokens, vec!["echo", "three   spaces"]);
+    fn test_single_quotes() {
+        // Preserves spaces literally
+        assert_eq!(
+            tokenize("'hello    world'").unwrap(),
+            vec!["hello    world"]
+        );
+        // Literal inside single
+        assert_eq!(tokenize("'shell\"s test'").unwrap(), vec!["shell\"s test"]);
     }
 
     #[test]
-    fn test_backslash_preserves_first_space() {
-        let input = "echo before\\     after";
-        let tokens = tokenize(input).unwrap();
-        assert_eq!(tokens, vec!["echo", "before ", "after"]);
+    fn test_plain_spaces() {
+        // Collapses unquoted spaces
+        assert_eq!(tokenize("hello    world").unwrap(), vec!["hello", "world"]);
     }
 
     #[test]
-    fn test_backslash_no_special_meaning() {
-        let input = "echo test\\nexample";
-        let tokens = tokenize(input).unwrap();
-        assert_eq!(tokens, vec!["echo", "testnexample"]);
+    fn test_concatenation() {
+        // Quoted strings next to each other
+        assert_eq!(tokenize("'hello''world'").unwrap(), vec!["helloworld"]);
+        assert_eq!(tokenize("\"hello\"\"world\"").unwrap(), vec!["helloworld"]);
+        assert_eq!(tokenize("hello''world").unwrap(), vec!["helloworld"]);
     }
 
     #[test]
-    fn test_backslash_backslash() {
-        let input = "echo hello\\\\world";
-        let tokens = tokenize(input).unwrap();
-        assert_eq!(tokens, vec!["echo", "hello\\world"]);
+    fn test_double_quotes() {
+        // Preserves spaces
+        assert_eq!(
+            tokenize("\"hello    world\"").unwrap(),
+            vec!["hello    world"]
+        );
+        // Single quote inside double is literal
+        assert_eq!(tokenize("\"shell's test\"").unwrap(), vec!["shell's test"]);
     }
 
     #[test]
-    fn test_backslash_quotes() {
-        let input = "echo \\'hello\\'";
-        let tokens = tokenize(input).unwrap();
-        assert_eq!(tokens, vec!["echo", "'hello'"]);
+    fn test_backslash_outside_quotes() {
+        assert_eq!(
+            tokenize("echo three\\ \\ \\ spaces").unwrap(),
+            vec!["echo", "three   spaces"]
+        );
+        assert_eq!(
+            tokenize("echo before\\     after").unwrap(),
+            vec!["echo", "before ", "after"]
+        );
+        assert_eq!(
+            tokenize("echo test\\nexample").unwrap(),
+            vec!["echo", "testnexample"]
+        );
+        assert_eq!(
+            tokenize("echo hello\\\\world").unwrap(),
+            vec!["echo", "hello\\world"]
+        );
+        assert_eq!(
+            tokenize("echo \\'hello\\'").unwrap(),
+            vec!["echo", "'hello'"]
+        );
     }
 
     #[test]
-    fn test_mixed_quoted_and_escaped() {
-        let input = "echo \"hello\"\\ world'!'";
-        let tokens = tokenize(input).unwrap();
-        assert_eq!(tokens, vec!["echo", "hello world!"]);
+    fn test_backslash_inside_double_quotes() {
+        // Special escapes
+        assert_eq!(
+            tokenize("\"A \\\\ escapes itself\"").unwrap(),
+            vec!["A \\ escapes itself"]
+        );
+        assert_eq!(
+            tokenize("\"A \\\" inside double quotes\"").unwrap(),
+            vec!["A \" inside double quotes"]
+        );
+        // Literal backslash (n is not special)
+        assert_eq!(
+            tokenize("\"hello\\nworld\"").unwrap(),
+            vec!["hello\\nworld"]
+        );
+    }
+
+    #[test]
+    fn test_mixed_complex() {
+        // 'hello' + space (escaped) + "world"
+        assert_eq!(
+            tokenize("'hello'\\ \"world\"").unwrap(),
+            vec!["hello world"]
+        );
     }
 }
