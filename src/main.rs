@@ -227,30 +227,45 @@ fn run_builtin(
             None => writeln!(stderr, "type: missing argument")?,
         },
         "history" => {
-            if args.first().map(|s| s.as_str()) == Some("-r") {
-                if let Some(path) = args.get(1) {
-                    match fs::read_to_string(path) {
-                        Ok(content) => {
-                            for line in content.lines() {
-                                let trimmed = line.trim();
-                                if !trimmed.is_empty() {
-                                    history.push(trimmed.to_string());
+            let flag = args.first().map(|s| s.as_str());
+            match flag {
+                Some("-r") => {
+                    if let Some(path) = args.get(1) {
+                        match fs::read_to_string(path) {
+                            Ok(content) => {
+                                for line in content.lines() {
+                                    let trimmed = line.trim();
+                                    if !trimmed.is_empty() {
+                                        history.push(trimmed.to_string());
+                                    }
                                 }
                             }
+                            Err(e) => writeln!(stderr, "history: {}: {}", path, e)?,
                         }
-                        Err(e) => writeln!(stderr, "history: {}: {}", path, e)?,
+                    } else {
+                        writeln!(stderr, "history: -r: missing filename")?;
                     }
-                } else {
-                    writeln!(stderr, "history: -r: missing filename")?;
                 }
-            } else {
-                let limit = args
-                    .first()
-                    .and_then(|s| s.parse::<usize>().ok())
-                    .unwrap_or(history.len());
-                let skip_count = history.len().saturating_sub(limit);
-                for (i, entry) in history.iter().enumerate().skip(skip_count) {
-                    writeln!(stdout, "{:>5}  {}", i + 1, entry)?;
+                Some("-w") => {
+                    if let Some(path) = args.get(1) {
+                        let mut file = File::create(path)
+                            .with_context(|| format!("history: failed to create file: {}", path))?;
+                        for entry in history {
+                            writeln!(file, "{}", entry)?;
+                        }
+                    } else {
+                        writeln!(stderr, "history: -w: missing filename")?;
+                    }
+                }
+                _ => {
+                    let limit = args
+                        .first()
+                        .and_then(|s| s.parse::<usize>().ok())
+                        .unwrap_or(history.len());
+                    let skip_count = history.len().saturating_sub(limit);
+                    for (i, entry) in history.iter().enumerate().skip(skip_count) {
+                        writeln!(stdout, "{:>5}  {}", i + 1, entry)?;
+                    }
                 }
             }
         }
@@ -288,7 +303,6 @@ fn main() -> Result<()> {
                     continue;
                 }
 
-                // Add to both rustyline and our list before processing
                 let _ = rl.add_history_entry(trimmed);
                 history_list.push(trimmed.to_string());
 
