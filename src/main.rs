@@ -286,7 +286,22 @@ fn run_builtin(
 fn main() -> Result<()> {
     let mut rl = DefaultEditor::new().context("failed to initialize line editor")?;
     let mut history_list = Vec::new();
-    let mut history_sync_idx = 0;
+
+    // Startup: Load history from HISTFILE if defined
+    if let Ok(histfile) = env::var("HISTFILE") {
+        if let Ok(content) = fs::read_to_string(&histfile) {
+            for line in content.lines() {
+                let trimmed = line.trim();
+                if !trimmed.is_empty() {
+                    let _ = rl.add_history_entry(trimmed);
+                    history_list.push(trimmed.to_string());
+                }
+            }
+        }
+    }
+
+    // Initialize sync index to the number of loaded items
+    let mut history_sync_idx = history_list.len();
 
     loop {
         let readline = rl.readline("$ ");
