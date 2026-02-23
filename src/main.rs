@@ -107,9 +107,11 @@ fn execute_pipeline(
         let is_last = i == n_stages - 1;
 
         if is_builtin(&command) {
+            // 'exit' is handled by the caller (main loop) to allow clean shutdown
             if command == "exit" {
-                std::process::exit(0);
+                continue;
             }
+
             if let InputSource::Pipe(mut pipe) = prev_input {
                 let mut discard = Vec::new();
                 let _ = pipe.read_to_end(&mut discard);
@@ -278,6 +280,7 @@ fn run_builtin(
                 writeln!(stderr, "cd: {}: No such file or directory", target)?;
             }
         }
+        "exit" => {} // No-op here; handled by the loop break in main
         _ => unreachable!(),
     }
     Ok(())
@@ -287,7 +290,6 @@ fn main() -> Result<()> {
     let mut rl = DefaultEditor::new().context("failed to initialize line editor")?;
     let mut history_list = Vec::new();
 
-    // Startup: Load history from HISTFILE if defined
     if let Ok(histfile) = env::var("HISTFILE") {
         if let Ok(content) = fs::read_to_string(&histfile) {
             for line in content.lines() {
@@ -300,7 +302,6 @@ fn main() -> Result<()> {
         }
     }
 
-    // Initialize sync index to the number of loaded items
     let mut history_sync_idx = history_list.len();
 
     loop {
@@ -321,6 +322,7 @@ fn main() -> Result<()> {
                         continue;
                     }
                 };
+
                 let mut stages_tokens = Vec::new();
                 let mut current_chunk = Vec::new();
                 for token in tokens {
@@ -337,6 +339,12 @@ fn main() -> Result<()> {
                     stages.push(parse_stage(st)?);
                 }
 
+                // Check for 'exit' at the start of a single-stage command
+                if stages.len() == 1 && stages[0].tokens.first().map(|s| s.as_str()) == Some("exit")
+                {
+                    break;
+                }
+
                 if let Err(e) = execute_pipeline(stages, &mut history_list, &mut history_sync_idx) {
                     eprintln!("{}", e);
                 }
@@ -349,5 +357,15 @@ fn main() -> Result<()> {
             }
         }
     }
+
+    // On exit: Write history to HISTFILE if defined
+    if let Ok(histfile) = env::var("HISTFILE") {
+        if let Ok(mut file) = File::create(histfile) {
+            for entry in &history_list {
+                let _ = writeln!(file, "{}", entry);
+            }
+        }
+    }
+
     Ok(())
 }
