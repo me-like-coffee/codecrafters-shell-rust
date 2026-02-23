@@ -10,7 +10,6 @@ use std::io::{self, Read, Write};
 use std::path::PathBuf;
 use std::process::{Child, ChildStdout, Command, Stdio};
 
-/// Searches the system PATH for an executable.
 fn find_exe_path(name: &str) -> Option<PathBuf> {
     let paths = env::var_os("PATH")?;
     env::split_paths(&paths)
@@ -18,26 +17,22 @@ fn find_exe_path(name: &str) -> Option<PathBuf> {
         .find(|path| path.is_executable())
 }
 
-/// Checks if a command is a known shell builtin.
 fn is_builtin(cmd: &str) -> bool {
     matches!(cmd, "exit" | "echo" | "type" | "pwd" | "cd" | "history")
 }
 
-/// Tracks where the input for the current stage is coming from.
 enum InputSource {
     Terminal,
     Pipe(ChildStdout),
     Buffer(Vec<u8>),
 }
 
-/// Represents a single command within a pipeline, including its redirections.
 struct CommandStage {
     tokens: Vec<String>,
     stdout_file: Option<File>,
     stderr_file: Option<File>,
 }
 
-/// Extracts redirection operators from a list of tokens.
 fn parse_stage(tokens: Vec<String>) -> Result<CommandStage> {
     let mut clean_args = Vec::new();
     let mut i = 0;
@@ -59,11 +54,9 @@ fn parse_stage(tokens: Vec<String>) -> Result<CommandStage> {
                 } else {
                     options.truncate(true);
                 }
-
                 let file = options
                     .open(filename)
                     .with_context(|| format!("failed to open file: {}", filename))?;
-
                 if is_stderr {
                     stderr_file = Some(file);
                 } else {
@@ -76,7 +69,6 @@ fn parse_stage(tokens: Vec<String>) -> Result<CommandStage> {
         clean_args.push(tokens[i].clone());
         i += 1;
     }
-
     Ok(CommandStage {
         tokens: clean_args,
         stdout_file,
@@ -84,23 +76,24 @@ fn parse_stage(tokens: Vec<String>) -> Result<CommandStage> {
     })
 }
 
-/// Bridges data from a builtin's memory buffer into an OS pipe for external commands.
 fn create_pipe_from_data(data: Vec<u8>) -> Result<Stdio> {
     let mut child = Command::new("cat")
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .spawn()
         .context("failed to spawn bridge process")?;
-
     let mut stdin = child.stdin.take().unwrap();
     std::thread::spawn(move || {
         let _ = stdin.write_all(&data);
     });
-
     Ok(Stdio::from(child.stdout.take().unwrap()))
 }
 
-fn execute_pipeline(mut stages: Vec<CommandStage>, history: &mut Vec<String>) -> Result<()> {
+fn execute_pipeline(
+    mut stages: Vec<CommandStage>,
+    history: &mut Vec<String>,
+    history_sync_idx: &mut usize,
+) -> Result<()> {
     let mut prev_input = InputSource::Terminal;
     let mut children: Vec<Child> = Vec::new();
     let n_stages = stages.len();
@@ -110,7 +103,6 @@ fn execute_pipeline(mut stages: Vec<CommandStage>, history: &mut Vec<String>) ->
         if stage.tokens.is_empty() {
             continue;
         }
-
         let command = stage.tokens.remove(0);
         let is_last = i == n_stages - 1;
 
@@ -118,27 +110,24 @@ fn execute_pipeline(mut stages: Vec<CommandStage>, history: &mut Vec<String>) ->
             if command == "exit" {
                 std::process::exit(0);
             }
-
             if let InputSource::Pipe(mut pipe) = prev_input {
                 let mut discard = Vec::new();
                 let _ = pipe.read_to_end(&mut discard);
             }
-
             let mut builtin_out = Vec::new();
             let mut std_err = io::stderr();
             let err_writer: &mut dyn Write = match stage.stderr_file.as_mut() {
                 Some(f) => f,
                 None => &mut std_err,
             };
-
             run_builtin(
                 &command,
                 &stage.tokens,
                 &mut builtin_out,
                 err_writer,
                 history,
+                history_sync_idx,
             )?;
-
             if is_last {
                 if let Some(mut f) = stage.stdout_file {
                     f.write_all(&builtin_out)?;
@@ -152,7 +141,6 @@ fn execute_pipeline(mut stages: Vec<CommandStage>, history: &mut Vec<String>) ->
         } else {
             let mut cmd = Command::new(&command);
             cmd.args(&stage.tokens);
-
             match prev_input {
                 InputSource::Terminal => {
                     cmd.stdin(Stdio::inherit());
@@ -164,7 +152,6 @@ fn execute_pipeline(mut stages: Vec<CommandStage>, history: &mut Vec<String>) ->
                     cmd.stdin(create_pipe_from_data(data)?);
                 }
             }
-
             if is_last {
                 let out = stage
                     .stdout_file
@@ -174,18 +161,15 @@ fn execute_pipeline(mut stages: Vec<CommandStage>, history: &mut Vec<String>) ->
             } else {
                 cmd.stdout(Stdio::piped());
             }
-
             cmd.stderr(
                 stage
                     .stderr_file
                     .map(Stdio::from)
                     .unwrap_or(Stdio::inherit()),
             );
-
             let mut child = cmd
                 .spawn()
                 .map_err(|_| anyhow::anyhow!("{}: command not found", command))?;
-
             if !is_last {
                 let out = child.stdout.take().context("failed to capture stdout")?;
                 prev_input = InputSource::Pipe(out);
@@ -195,11 +179,9 @@ fn execute_pipeline(mut stages: Vec<CommandStage>, history: &mut Vec<String>) ->
             children.push(child);
         }
     }
-
     for mut child in children {
         let _ = child.wait();
     }
-
     Ok(())
 }
 
@@ -209,6 +191,7 @@ fn run_builtin(
     stdout: &mut dyn Write,
     stderr: &mut dyn Write,
     history: &mut Vec<String>,
+    history_sync_idx: &mut usize,
 ) -> Result<()> {
     match cmd {
         "echo" => {
@@ -231,16 +214,13 @@ fn run_builtin(
             match flag {
                 Some("-r") => {
                     if let Some(path) = args.get(1) {
-                        match fs::read_to_string(path) {
-                            Ok(content) => {
-                                for line in content.lines() {
-                                    let trimmed = line.trim();
-                                    if !trimmed.is_empty() {
-                                        history.push(trimmed.to_string());
-                                    }
+                        if let Ok(content) = fs::read_to_string(path) {
+                            for line in content.lines() {
+                                let trimmed = line.trim();
+                                if !trimmed.is_empty() {
+                                    history.push(trimmed.to_string());
                                 }
                             }
-                            Err(e) => writeln!(stderr, "history: {}: {}", path, e)?,
                         }
                     } else {
                         writeln!(stderr, "history: -r: missing filename")?;
@@ -248,13 +228,27 @@ fn run_builtin(
                 }
                 Some("-w") => {
                     if let Some(path) = args.get(1) {
-                        let mut file = File::create(path)
-                            .with_context(|| format!("history: failed to create file: {}", path))?;
-                        for entry in history {
-                            writeln!(file, "{}", entry)?;
+                        if let Ok(mut file) = File::create(path) {
+                            for entry in history.iter() {
+                                writeln!(file, "{}", entry)?;
+                            }
+                            *history_sync_idx = history.len();
                         }
                     } else {
                         writeln!(stderr, "history: -w: missing filename")?;
+                    }
+                }
+                Some("-a") => {
+                    if let Some(path) = args.get(1) {
+                        let mut options = OpenOptions::new();
+                        if let Ok(mut file) = options.create(true).append(true).open(path) {
+                            for entry in &history[*history_sync_idx..] {
+                                writeln!(file, "{}", entry)?;
+                            }
+                            *history_sync_idx = history.len();
+                        }
+                    } else {
+                        writeln!(stderr, "history: -a: missing filename")?;
                     }
                 }
                 _ => {
@@ -276,7 +270,7 @@ fn run_builtin(
         "cd" => {
             let target = args.first().map(|s| s.as_str()).unwrap_or("~");
             let target_path = if target == "~" {
-                dirs::home_dir().context("could not find home directory")?
+                dirs::home_dir().context("home error")?
             } else {
                 PathBuf::from(target)
             };
@@ -292,17 +286,16 @@ fn run_builtin(
 fn main() -> Result<()> {
     let mut rl = DefaultEditor::new().context("failed to initialize line editor")?;
     let mut history_list = Vec::new();
+    let mut history_sync_idx = 0;
 
     loop {
         let readline = rl.readline("$ ");
-
         match readline {
             Ok(input) => {
                 let trimmed = input.trim();
                 if trimmed.is_empty() {
                     continue;
                 }
-
                 let _ = rl.add_history_entry(trimmed);
                 history_list.push(trimmed.to_string());
 
@@ -313,7 +306,6 @@ fn main() -> Result<()> {
                         continue;
                     }
                 };
-
                 let mut stages_tokens = Vec::new();
                 let mut current_chunk = Vec::new();
                 for token in tokens {
@@ -330,7 +322,7 @@ fn main() -> Result<()> {
                     stages.push(parse_stage(st)?);
                 }
 
-                if let Err(e) = execute_pipeline(stages, &mut history_list) {
+                if let Err(e) = execute_pipeline(stages, &mut history_list, &mut history_sync_idx) {
                     eprintln!("{}", e);
                 }
             }
