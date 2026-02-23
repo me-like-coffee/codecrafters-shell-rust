@@ -5,11 +5,12 @@ use is_executable::IsExecutable;
 use rustyline::DefaultEditor;
 use rustyline::error::ReadlineError;
 use std::env;
-use std::fs::{File, OpenOptions};
+use std::fs::{self, File, OpenOptions};
 use std::io::{self, Read, Write};
 use std::path::PathBuf;
 use std::process::{Child, ChildStdout, Command, Stdio};
 
+/// Searches the system PATH for an executable.
 fn find_exe_path(name: &str) -> Option<PathBuf> {
     let paths = env::var_os("PATH")?;
     env::split_paths(&paths)
@@ -17,22 +18,26 @@ fn find_exe_path(name: &str) -> Option<PathBuf> {
         .find(|path| path.is_executable())
 }
 
+/// Checks if a command is a known shell builtin.
 fn is_builtin(cmd: &str) -> bool {
     matches!(cmd, "exit" | "echo" | "type" | "pwd" | "cd" | "history")
 }
 
+/// Tracks where the input for the current stage is coming from.
 enum InputSource {
     Terminal,
     Pipe(ChildStdout),
     Buffer(Vec<u8>),
 }
 
+/// Represents a single command within a pipeline, including its redirections.
 struct CommandStage {
     tokens: Vec<String>,
     stdout_file: Option<File>,
     stderr_file: Option<File>,
 }
 
+/// Extracts redirection operators from a list of tokens.
 fn parse_stage(tokens: Vec<String>) -> Result<CommandStage> {
     let mut clean_args = Vec::new();
     let mut i = 0;
@@ -54,9 +59,11 @@ fn parse_stage(tokens: Vec<String>) -> Result<CommandStage> {
                 } else {
                     options.truncate(true);
                 }
+
                 let file = options
                     .open(filename)
                     .with_context(|| format!("failed to open file: {}", filename))?;
+
                 if is_stderr {
                     stderr_file = Some(file);
                 } else {
@@ -69,6 +76,7 @@ fn parse_stage(tokens: Vec<String>) -> Result<CommandStage> {
         clean_args.push(tokens[i].clone());
         i += 1;
     }
+
     Ok(CommandStage {
         tokens: clean_args,
         stdout_file,
@@ -76,17 +84,123 @@ fn parse_stage(tokens: Vec<String>) -> Result<CommandStage> {
     })
 }
 
+/// Bridges data from a builtin's memory buffer into an OS pipe for external commands.
 fn create_pipe_from_data(data: Vec<u8>) -> Result<Stdio> {
     let mut child = Command::new("cat")
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .spawn()
         .context("failed to spawn bridge process")?;
+
     let mut stdin = child.stdin.take().unwrap();
     std::thread::spawn(move || {
         let _ = stdin.write_all(&data);
     });
+
     Ok(Stdio::from(child.stdout.take().unwrap()))
+}
+
+fn execute_pipeline(mut stages: Vec<CommandStage>, history: &mut Vec<String>) -> Result<()> {
+    let mut prev_input = InputSource::Terminal;
+    let mut children: Vec<Child> = Vec::new();
+    let n_stages = stages.len();
+
+    for i in 0..n_stages {
+        let mut stage = stages.remove(0);
+        if stage.tokens.is_empty() {
+            continue;
+        }
+
+        let command = stage.tokens.remove(0);
+        let is_last = i == n_stages - 1;
+
+        if is_builtin(&command) {
+            if command == "exit" {
+                std::process::exit(0);
+            }
+
+            if let InputSource::Pipe(mut pipe) = prev_input {
+                let mut discard = Vec::new();
+                let _ = pipe.read_to_end(&mut discard);
+            }
+
+            let mut builtin_out = Vec::new();
+            let mut std_err = io::stderr();
+            let err_writer: &mut dyn Write = match stage.stderr_file.as_mut() {
+                Some(f) => f,
+                None => &mut std_err,
+            };
+
+            run_builtin(
+                &command,
+                &stage.tokens,
+                &mut builtin_out,
+                err_writer,
+                history,
+            )?;
+
+            if is_last {
+                if let Some(mut f) = stage.stdout_file {
+                    f.write_all(&builtin_out)?;
+                } else {
+                    io::stdout().write_all(&builtin_out)?;
+                }
+                prev_input = InputSource::Terminal;
+            } else {
+                prev_input = InputSource::Buffer(builtin_out);
+            }
+        } else {
+            let mut cmd = Command::new(&command);
+            cmd.args(&stage.tokens);
+
+            match prev_input {
+                InputSource::Terminal => {
+                    cmd.stdin(Stdio::inherit());
+                }
+                InputSource::Pipe(pipe) => {
+                    cmd.stdin(Stdio::from(pipe));
+                }
+                InputSource::Buffer(data) => {
+                    cmd.stdin(create_pipe_from_data(data)?);
+                }
+            }
+
+            if is_last {
+                let out = stage
+                    .stdout_file
+                    .map(Stdio::from)
+                    .unwrap_or(Stdio::inherit());
+                cmd.stdout(out);
+            } else {
+                cmd.stdout(Stdio::piped());
+            }
+
+            cmd.stderr(
+                stage
+                    .stderr_file
+                    .map(Stdio::from)
+                    .unwrap_or(Stdio::inherit()),
+            );
+
+            let mut child = cmd
+                .spawn()
+                .map_err(|_| anyhow::anyhow!("{}: command not found", command))?;
+
+            if !is_last {
+                let out = child.stdout.take().context("failed to capture stdout")?;
+                prev_input = InputSource::Pipe(out);
+            } else {
+                prev_input = InputSource::Terminal;
+            }
+            children.push(child);
+        }
+    }
+
+    for mut child in children {
+        let _ = child.wait();
+    }
+
+    Ok(())
 }
 
 fn run_builtin(
@@ -94,7 +208,7 @@ fn run_builtin(
     args: &[String],
     stdout: &mut dyn Write,
     stderr: &mut dyn Write,
-    history: &[String],
+    history: &mut Vec<String>,
 ) -> Result<()> {
     match cmd {
         "echo" => {
@@ -113,13 +227,31 @@ fn run_builtin(
             None => writeln!(stderr, "type: missing argument")?,
         },
         "history" => {
-            let limit = args
-                .first()
-                .and_then(|s| s.parse::<usize>().ok())
-                .unwrap_or(history.len());
-            let skip_count = history.len().saturating_sub(limit);
-            for (i, entry) in history.iter().enumerate().skip(skip_count) {
-                writeln!(stdout, "{:>5}  {}", i + 1, entry)?;
+            if args.first().map(|s| s.as_str()) == Some("-r") {
+                if let Some(path) = args.get(1) {
+                    match fs::read_to_string(path) {
+                        Ok(content) => {
+                            for line in content.lines() {
+                                let trimmed = line.trim();
+                                if !trimmed.is_empty() {
+                                    history.push(trimmed.to_string());
+                                }
+                            }
+                        }
+                        Err(e) => writeln!(stderr, "history: {}: {}", path, e)?,
+                    }
+                } else {
+                    writeln!(stderr, "history: -r: missing filename")?;
+                }
+            } else {
+                let limit = args
+                    .first()
+                    .and_then(|s| s.parse::<usize>().ok())
+                    .unwrap_or(history.len());
+                let skip_count = history.len().saturating_sub(limit);
+                for (i, entry) in history.iter().enumerate().skip(skip_count) {
+                    writeln!(stdout, "{:>5}  {}", i + 1, entry)?;
+                }
             }
         }
         "pwd" => {
@@ -142,104 +274,11 @@ fn run_builtin(
     Ok(())
 }
 
-fn execute_pipeline(mut stages: Vec<CommandStage>, history: &[String]) -> Result<()> {
-    let mut prev_input = InputSource::Terminal;
-    let mut children: Vec<Child> = Vec::new();
-    let n_stages = stages.len();
-
-    for i in 0..n_stages {
-        let mut stage = stages.remove(0);
-        if stage.tokens.is_empty() {
-            continue;
-        }
-        let command = stage.tokens.remove(0);
-        let is_last = i == n_stages - 1;
-
-        if is_builtin(&command) {
-            if command == "exit" {
-                std::process::exit(0);
-            }
-            if let InputSource::Pipe(mut pipe) = prev_input {
-                let mut discard = Vec::new();
-                let _ = pipe.read_to_end(&mut discard);
-            }
-            let mut builtin_out = Vec::new();
-            let mut std_err = io::stderr();
-            let err_writer: &mut dyn Write = match stage.stderr_file.as_mut() {
-                Some(f) => f,
-                None => &mut std_err,
-            };
-            run_builtin(
-                &command,
-                &stage.tokens,
-                &mut builtin_out,
-                err_writer,
-                history,
-            )?;
-            if is_last {
-                if let Some(mut f) = stage.stdout_file {
-                    f.write_all(&builtin_out)?;
-                } else {
-                    io::stdout().write_all(&builtin_out)?;
-                }
-                prev_input = InputSource::Terminal;
-            } else {
-                prev_input = InputSource::Buffer(builtin_out);
-            }
-        } else {
-            let mut cmd = Command::new(&command);
-            cmd.args(&stage.tokens);
-            match prev_input {
-                InputSource::Terminal => {
-                    cmd.stdin(Stdio::inherit());
-                }
-                InputSource::Pipe(pipe) => {
-                    cmd.stdin(Stdio::from(pipe));
-                }
-                InputSource::Buffer(data) => {
-                    cmd.stdin(create_pipe_from_data(data)?);
-                }
-            }
-            if is_last {
-                let out = stage
-                    .stdout_file
-                    .map(Stdio::from)
-                    .unwrap_or(Stdio::inherit());
-                cmd.stdout(out);
-            } else {
-                cmd.stdout(Stdio::piped());
-            }
-            cmd.stderr(
-                stage
-                    .stderr_file
-                    .map(Stdio::from)
-                    .unwrap_or(Stdio::inherit()),
-            );
-            let mut child = cmd
-                .spawn()
-                .map_err(|_| anyhow::anyhow!("{}: command not found", command))?;
-            if !is_last {
-                let out = child.stdout.take().context("failed to capture stdout")?;
-                prev_input = InputSource::Pipe(out);
-            } else {
-                prev_input = InputSource::Terminal;
-            }
-            children.push(child);
-        }
-    }
-    for mut child in children {
-        let _ = child.wait();
-    }
-    Ok(())
-}
-
 fn main() -> Result<()> {
-    // 1. Initialize the Rustyline Editor
     let mut rl = DefaultEditor::new().context("failed to initialize line editor")?;
     let mut history_list = Vec::new();
 
     loop {
-        // 2. Readline handles Up/Down arrows and returns the final string
         let readline = rl.readline("$ ");
 
         match readline {
@@ -249,7 +288,7 @@ fn main() -> Result<()> {
                     continue;
                 }
 
-                // 3. Update both Rustyline UI history and our builtin history list
+                // Add to both rustyline and our list before processing
                 let _ = rl.add_history_entry(trimmed);
                 history_list.push(trimmed.to_string());
 
@@ -277,17 +316,12 @@ fn main() -> Result<()> {
                     stages.push(parse_stage(st)?);
                 }
 
-                if let Err(e) = execute_pipeline(stages, &history_list) {
+                if let Err(e) = execute_pipeline(stages, &mut history_list) {
                     eprintln!("{}", e);
                 }
             }
-            // 4. Handle Ctrl+C (Interrupted) and Ctrl+D (EOF/Eof)
-            Err(ReadlineError::Interrupted) => {
-                continue; // Clear current line on Ctrl+C
-            }
-            Err(ReadlineError::Eof) => {
-                break; // Exit shell on Ctrl+D
-            }
+            Err(ReadlineError::Interrupted) => continue,
+            Err(ReadlineError::Eof) => break,
             Err(err) => {
                 eprintln!("Editor Error: {:?}", err);
                 break;
