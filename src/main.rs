@@ -8,7 +8,6 @@ use std::io::{self, Read, Write};
 use std::path::PathBuf;
 use std::process::{Child, ChildStdout, Command, Stdio};
 
-/// Searches the system PATH for an executable.
 fn find_exe_path(name: &str) -> Option<PathBuf> {
     let paths = env::var_os("PATH")?;
     env::split_paths(&paths)
@@ -16,26 +15,22 @@ fn find_exe_path(name: &str) -> Option<PathBuf> {
         .find(|path| path.is_executable())
 }
 
-/// Checks if a command is a known shell builtin.
 fn is_builtin(cmd: &str) -> bool {
     matches!(cmd, "exit" | "echo" | "type" | "pwd" | "cd" | "history")
 }
 
-/// Tracks where the input for the current stage is coming from.
 enum InputSource {
     Terminal,
     Pipe(ChildStdout),
     Buffer(Vec<u8>),
 }
 
-/// Represents a single command within a pipeline, including its redirections.
 struct CommandStage {
     tokens: Vec<String>,
     stdout_file: Option<File>,
     stderr_file: Option<File>,
 }
 
-/// Extracts redirection operators from a list of tokens.
 fn parse_stage(tokens: Vec<String>) -> Result<CommandStage> {
     let mut clean_args = Vec::new();
     let mut i = 0;
@@ -74,7 +69,6 @@ fn parse_stage(tokens: Vec<String>) -> Result<CommandStage> {
         clean_args.push(tokens[i].clone());
         i += 1;
     }
-
     Ok(CommandStage {
         tokens: clean_args,
         stdout_file,
@@ -107,7 +101,6 @@ fn execute_pipeline(mut stages: Vec<CommandStage>, history: &[String]) -> Result
         if stage.tokens.is_empty() {
             continue;
         }
-
         let command = stage.tokens.remove(0);
         let is_last = i == n_stages - 1;
 
@@ -115,7 +108,6 @@ fn execute_pipeline(mut stages: Vec<CommandStage>, history: &[String]) -> Result
             if command == "exit" {
                 std::process::exit(0);
             }
-
             if let InputSource::Pipe(mut pipe) = prev_input {
                 let mut discard = Vec::new();
                 let _ = pipe.read_to_end(&mut discard);
@@ -192,11 +184,9 @@ fn execute_pipeline(mut stages: Vec<CommandStage>, history: &[String]) -> Result
             children.push(child);
         }
     }
-
     for mut child in children {
         let _ = child.wait();
     }
-
     Ok(())
 }
 
@@ -224,8 +214,14 @@ fn run_builtin(
             None => writeln!(stderr, "type: missing argument")?,
         },
         "history" => {
-            for (i, entry) in history.iter().enumerate() {
-                // Formatting indices with right-alignment (e.g., width of 5)
+            // Determine limit n. If no arg or invalid arg, show all.
+            let limit = args
+                .first()
+                .and_then(|s| s.parse::<usize>().ok())
+                .unwrap_or(history.len());
+            let skip_count = history.len().saturating_sub(limit);
+
+            for (i, entry) in history.iter().enumerate().skip(skip_count) {
                 writeln!(stdout, "{:>5}  {}", i + 1, entry)?;
             }
         }
@@ -251,7 +247,6 @@ fn run_builtin(
 
 fn main() -> Result<()> {
     let mut history_list = Vec::new();
-
     loop {
         print!("$ ");
         io::stdout().flush().context("failed to flush stdout")?;
@@ -270,7 +265,6 @@ fn main() -> Result<()> {
             continue;
         }
 
-        // Add to history before tokenization
         history_list.push(trimmed_input.to_string());
 
         let tokens = match parser::tokenize(&input) {
