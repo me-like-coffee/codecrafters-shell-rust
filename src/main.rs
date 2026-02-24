@@ -2,13 +2,62 @@ mod parser;
 
 use anyhow::{Context, Result};
 use is_executable::IsExecutable;
-use rustyline::DefaultEditor;
+use rustyline::completion::{Completer, Pair};
 use rustyline::error::ReadlineError;
+use rustyline::highlight::Highlighter;
+use rustyline::hint::Hinter;
+use rustyline::validate::Validator;
+use rustyline::{CompletionType, Config, Context as RlContext, Editor, Helper};
 use std::env;
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, Read, Write};
 use std::path::PathBuf;
 use std::process::{Child, ChildStdout, Command, Stdio};
+
+// --- Rustyline Helper Implementation ---
+
+struct ShellHelper {
+    builtins: Vec<String>,
+}
+
+impl Completer for ShellHelper {
+    type Candidate = Pair;
+
+    fn complete(
+        &self,
+        line: &str,
+        pos: usize,
+        _ctx: &RlContext<'_>,
+    ) -> Result<(usize, Vec<Pair>), ReadlineError> {
+        // We only autocomplete at the start of the command (first word)
+        let slice = &line[..pos];
+
+        let mut candidates = Vec::new();
+        for builtin in &self.builtins {
+            if builtin.starts_with(slice) {
+                candidates.push(Pair {
+                    display: builtin.to_string(),
+                    replacement: format!("{} ", builtin), // Add trailing space
+                });
+            }
+        }
+
+        Ok((0, candidates))
+    }
+}
+
+impl Hinter for ShellHelper {
+    type Hint = String;
+    fn hint(&self, _line: &str, _pos: usize, _ctx: &RlContext<'_>) -> Option<String> {
+        None
+    }
+}
+
+impl Highlighter for ShellHelper {}
+impl Validator for ShellHelper {}
+impl Helper for ShellHelper {}
+
+// --- Shell Logic ---
 
 fn find_exe_path(name: &str) -> Option<PathBuf> {
     let paths = env::var_os("PATH")?;
@@ -56,7 +105,7 @@ fn parse_stage(tokens: Vec<String>) -> Result<CommandStage> {
                 }
                 let file = options
                     .open(filename)
-                    .with_context(|| format!("failed to open file: {}", filename))?;
+                    .with_context(|| format!("file error: {}", filename))?;
                 if is_stderr {
                     stderr_file = Some(file);
                 } else {
@@ -80,8 +129,7 @@ fn create_pipe_from_data(data: Vec<u8>) -> Result<Stdio> {
     let mut child = Command::new("cat")
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
-        .spawn()
-        .context("failed to spawn bridge process")?;
+        .spawn()?;
     let mut stdin = child.stdin.take().unwrap();
     std::thread::spawn(move || {
         let _ = stdin.write_all(&data);
@@ -92,7 +140,7 @@ fn create_pipe_from_data(data: Vec<u8>) -> Result<Stdio> {
 fn execute_pipeline(
     mut stages: Vec<CommandStage>,
     history: &mut Vec<String>,
-    history_sync_idx: &mut usize,
+    sync_idx: &mut usize,
 ) -> Result<()> {
     let mut prev_input = InputSource::Terminal;
     let mut children: Vec<Child> = Vec::new();
@@ -107,11 +155,9 @@ fn execute_pipeline(
         let is_last = i == n_stages - 1;
 
         if is_builtin(&command) {
-            // 'exit' is handled by the caller (main loop) to allow clean shutdown
             if command == "exit" {
                 continue;
             }
-
             if let InputSource::Pipe(mut pipe) = prev_input {
                 let mut discard = Vec::new();
                 let _ = pipe.read_to_end(&mut discard);
@@ -128,7 +174,7 @@ fn execute_pipeline(
                 &mut builtin_out,
                 err_writer,
                 history,
-                history_sync_idx,
+                sync_idx,
             )?;
             if is_last {
                 if let Some(mut f) = stage.stdout_file {
@@ -173,7 +219,7 @@ fn execute_pipeline(
                 .spawn()
                 .map_err(|_| anyhow::anyhow!("{}: command not found", command))?;
             if !is_last {
-                let out = child.stdout.take().context("failed to capture stdout")?;
+                let out = child.stdout.take().context("failed to take stdout")?;
                 prev_input = InputSource::Pipe(out);
             } else {
                 prev_input = InputSource::Terminal;
@@ -190,118 +236,117 @@ fn execute_pipeline(
 fn run_builtin(
     cmd: &str,
     args: &[String],
-    stdout: &mut dyn Write,
-    stderr: &mut dyn Write,
-    history: &mut Vec<String>,
-    history_sync_idx: &mut usize,
+    out: &mut dyn Write,
+    err: &mut dyn Write,
+    hist: &mut Vec<String>,
+    idx: &mut usize,
 ) -> Result<()> {
     match cmd {
         "echo" => {
-            writeln!(stdout, "{}", args.join(" "))?;
+            writeln!(out, "{}", args.join(" "))?;
         }
         "type" => match args.first() {
             Some(target) => {
                 if is_builtin(target) {
-                    writeln!(stdout, "{} is a shell builtin", target)?;
-                } else if let Some(exe_path) = find_exe_path(target) {
-                    writeln!(stdout, "{} is {}", target, exe_path.display())?;
+                    writeln!(out, "{} is a shell builtin", target)?;
+                } else if let Some(p) = find_exe_path(target) {
+                    writeln!(out, "{} is {}", target, p.display())?;
                 } else {
-                    writeln!(stdout, "{}: not found", target)?;
+                    writeln!(out, "{}: not found", target)?;
                 }
             }
-            None => writeln!(stderr, "type: missing argument")?,
+            None => writeln!(err, "type: missing argument")?,
         },
         "history" => {
             let flag = args.first().map(|s| s.as_str());
             match flag {
                 Some("-r") => {
-                    if let Some(path) = args.get(1) {
-                        if let Ok(content) = fs::read_to_string(path) {
-                            for line in content.lines() {
-                                let trimmed = line.trim();
-                                if !trimmed.is_empty() {
-                                    history.push(trimmed.to_string());
+                    if let Some(p) = args.get(1) {
+                        if let Ok(c) = fs::read_to_string(p) {
+                            for l in c.lines() {
+                                if !l.trim().is_empty() {
+                                    hist.push(l.trim().to_string());
                                 }
                             }
                         }
-                    } else {
-                        writeln!(stderr, "history: -r: missing filename")?;
                     }
                 }
                 Some("-w") => {
-                    if let Some(path) = args.get(1) {
-                        if let Ok(mut file) = File::create(path) {
-                            for entry in history.iter() {
-                                writeln!(file, "{}", entry)?;
+                    if let Some(p) = args.get(1) {
+                        if let Ok(mut f) = File::create(p) {
+                            for e in hist.iter() {
+                                writeln!(f, "{}", e)?;
                             }
-                            *history_sync_idx = history.len();
+                            *idx = hist.len();
                         }
-                    } else {
-                        writeln!(stderr, "history: -w: missing filename")?;
                     }
                 }
                 Some("-a") => {
-                    if let Some(path) = args.get(1) {
-                        let mut options = OpenOptions::new();
-                        if let Ok(mut file) = options.create(true).append(true).open(path) {
-                            for entry in &history[*history_sync_idx..] {
-                                writeln!(file, "{}", entry)?;
+                    if let Some(p) = args.get(1) {
+                        if let Ok(mut f) = OpenOptions::new().create(true).append(true).open(p) {
+                            for e in &hist[*idx..] {
+                                writeln!(f, "{}", e)?;
                             }
-                            *history_sync_idx = history.len();
+                            *idx = hist.len();
                         }
-                    } else {
-                        writeln!(stderr, "history: -a: missing filename")?;
                     }
                 }
                 _ => {
                     let limit = args
                         .first()
                         .and_then(|s| s.parse::<usize>().ok())
-                        .unwrap_or(history.len());
-                    let skip_count = history.len().saturating_sub(limit);
-                    for (i, entry) in history.iter().enumerate().skip(skip_count) {
-                        writeln!(stdout, "{:>5}  {}", i + 1, entry)?;
+                        .unwrap_or(hist.len());
+                    for (i, e) in hist
+                        .iter()
+                        .enumerate()
+                        .skip(hist.len().saturating_sub(limit))
+                    {
+                        writeln!(out, "{:>5}  {}", i + 1, e)?;
                     }
                 }
             }
         }
         "pwd" => {
-            let path = env::current_dir().context("failed to get current directory")?;
-            writeln!(stdout, "{}", path.display())?;
+            writeln!(out, "{}", env::current_dir()?.display())?;
         }
         "cd" => {
             let target = args.first().map(|s| s.as_str()).unwrap_or("~");
-            let target_path = if target == "~" {
+            let p = if target == "~" {
                 dirs::home_dir().context("home error")?
             } else {
                 PathBuf::from(target)
             };
-            if env::set_current_dir(&target_path).is_err() {
-                writeln!(stderr, "cd: {}: No such file or directory", target)?;
+            if env::set_current_dir(&p).is_err() {
+                writeln!(err, "cd: {}: No such file or directory", target)?;
             }
         }
-        "exit" => {} // No-op here; handled by the loop break in main
+        "exit" => {}
         _ => unreachable!(),
     }
     Ok(())
 }
 
 fn main() -> Result<()> {
-    let mut rl = DefaultEditor::new().context("failed to initialize line editor")?;
-    let mut history_list = Vec::new();
+    let config = Config::builder()
+        .completion_type(CompletionType::List)
+        .build();
+    let helper = ShellHelper {
+        builtins: vec!["echo".to_string(), "exit".to_string()],
+    };
+    let mut rl: Editor<ShellHelper, _> = Editor::with_config(config)?;
+    rl.set_helper(Some(helper));
 
-    if let Ok(histfile) = env::var("HISTFILE") {
-        if let Ok(content) = fs::read_to_string(&histfile) {
-            for line in content.lines() {
-                let trimmed = line.trim();
-                if !trimmed.is_empty() {
-                    let _ = rl.add_history_entry(trimmed);
-                    history_list.push(trimmed.to_string());
+    let mut history_list = Vec::new();
+    if let Ok(hf) = env::var("HISTFILE") {
+        if let Ok(c) = fs::read_to_string(&hf) {
+            for l in c.lines() {
+                if !l.trim().is_empty() {
+                    let _ = rl.add_history_entry(l.trim());
+                    history_list.push(l.trim().to_string());
                 }
             }
         }
     }
-
     let mut history_sync_idx = history_list.len();
 
     loop {
@@ -339,7 +384,6 @@ fn main() -> Result<()> {
                     stages.push(parse_stage(st)?);
                 }
 
-                // Check for 'exit' at the start of a single-stage command
                 if stages.len() == 1 && stages[0].tokens.first().map(|s| s.as_str()) == Some("exit")
                 {
                     break;
@@ -352,17 +396,16 @@ fn main() -> Result<()> {
             Err(ReadlineError::Interrupted) => continue,
             Err(ReadlineError::Eof) => break,
             Err(err) => {
-                eprintln!("Editor Error: {:?}", err);
+                eprintln!("Error: {:?}", err);
                 break;
             }
         }
     }
 
-    // On exit: Write history to HISTFILE if defined
-    if let Ok(histfile) = env::var("HISTFILE") {
-        if let Ok(mut file) = File::create(histfile) {
-            for entry in &history_list {
-                let _ = writeln!(file, "{}", entry);
+    if let Ok(hf) = env::var("HISTFILE") {
+        if let Ok(mut f) = File::create(hf) {
+            for e in &history_list {
+                let _ = writeln!(f, "{}", e);
             }
         }
     }
