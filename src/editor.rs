@@ -1,3 +1,4 @@
+use crate::builtins::is_builtin;
 use is_executable::IsExecutable;
 use rustyline::completion::{Completer, Pair};
 use rustyline::error::ReadlineError;
@@ -8,6 +9,7 @@ use rustyline::{Context as RlContext, Helper};
 use std::collections::HashSet;
 use std::env;
 use std::fs;
+use std::path::Path;
 
 pub struct ShellHelper {
     pub builtins: Vec<String>,
@@ -24,47 +26,70 @@ impl Completer for ShellHelper {
     ) -> Result<(usize, Vec<Pair>), ReadlineError> {
         let slice = &line[..pos];
 
-        // Identify the start of the word being completed
-        // If there's a space, we are completing an argument.
-        // If not, we are completing the command itself.
+        // Identify the start of the word being completed (last space)
         let start = slice.rfind(' ').map(|i| i + 1).unwrap_or(0);
-        let prefix = &slice[start..];
+        let word = &slice[start..];
 
         let mut unique_matches = HashSet::new();
 
-        // Command Completion (only if we are at the first word)
-        if start == 0 {
-            // Check Builtins
-            for b in &self.builtins {
-                if b.starts_with(prefix) {
-                    unique_matches.insert(b.clone());
+        // Path Completion Logic (Nested Paths)
+        if let Some(last_slash_idx) = word.rfind('/') {
+            // Split "path/to/f" into "path/to/" and "f"
+            let (dir_path_str, prefix) = word.split_at(last_slash_idx + 1);
+
+            // Use "." if the path is empty (though rfind('/') ensures it's not)
+            let search_dir = if dir_path_str.is_empty() {
+                "."
+            } else {
+                dir_path_str
+            };
+
+            if let Ok(entries) = fs::read_dir(search_dir) {
+                for entry in entries.flatten() {
+                    if let Some(name) = entry.file_name().to_str() {
+                        if name.starts_with(prefix) {
+                            // Construct full path for the replacement: "path/to/" + "file.txt"
+                            let mut full_path = dir_path_str.to_string();
+                            full_path.push_str(name);
+                            unique_matches.insert(full_path);
+                        }
+                    }
                 }
             }
+        } else {
+            // Fallback: Command and Current Directory Completion (No Slashes)
 
-            // Check PATH
-            if let Some(paths) = env::var_os("PATH") {
-                for dir in env::split_paths(&paths) {
-                    if let Ok(entries) = fs::read_dir(dir) {
-                        for entry in entries.flatten() {
-                            let path = entry.path();
-                            if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
-                                if name.starts_with(prefix) && path.is_executable() {
-                                    unique_matches.insert(name.to_string());
+            // Only check builtins and PATH if we are completing the first word
+            if start == 0 {
+                for b in &self.builtins {
+                    if b.starts_with(word) {
+                        unique_matches.insert(b.clone());
+                    }
+                }
+
+                if let Some(paths) = env::var_os("PATH") {
+                    for dir in env::split_paths(&paths) {
+                        if let Ok(entries) = fs::read_dir(dir) {
+                            for entry in entries.flatten() {
+                                let path = entry.path();
+                                if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
+                                    if name.starts_with(word) && path.is_executable() {
+                                        unique_matches.insert(name.to_string());
+                                    }
                                 }
                             }
                         }
                     }
                 }
             }
-        }
 
-        // Filename Completion (Always check current directory for arguments or commands)
-        // Per requirements: search current directory for files starting with prefix
-        if let Ok(entries) = fs::read_dir(".") {
-            for entry in entries.flatten() {
-                if let Some(name) = entry.file_name().to_str() {
-                    if name.starts_with(prefix) {
-                        unique_matches.insert(name.to_string());
+            // Always check the current directory
+            if let Ok(entries) = fs::read_dir(".") {
+                for entry in entries.flatten() {
+                    if let Some(name) = entry.file_name().to_str() {
+                        if name.starts_with(word) {
+                            unique_matches.insert(name.to_string());
+                        }
                     }
                 }
             }
@@ -74,13 +99,12 @@ impl Completer for ShellHelper {
             .into_iter()
             .map(|name| Pair {
                 display: name.clone(),
-                replacement: format!("{} ", name), // Add trailing space
+                replacement: format!("{} ", name),
             })
             .collect();
 
         candidates.sort_by(|a, b| a.display.cmp(&b.display));
 
-        // Return 'start' so rustyline knows where to begin the replacement
         Ok((start, candidates))
     }
 }
