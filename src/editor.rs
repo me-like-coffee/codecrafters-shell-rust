@@ -5,7 +5,7 @@ use rustyline::highlight::Highlighter;
 use rustyline::hint::Hinter;
 use rustyline::validate::Validator;
 use rustyline::{Context as RlContext, Helper};
-use std::collections::HashMap; // Use HashMap instead of HashSet
+use std::collections::HashMap;
 use std::env;
 use std::fs;
 
@@ -24,14 +24,14 @@ impl Completer for ShellHelper {
     ) -> Result<(usize, Vec<Pair>), ReadlineError> {
         let slice = &line[..pos];
 
-        // Identify the start of the word being completed (last space)
+        // 1. Identify the start of the word being completed (last space)
         let start = slice.rfind(' ').map(|i| i + 1).unwrap_or(0);
         let word = &slice[start..];
 
         // Key: Replacement String, Value: Pair object
         let mut unique_matches = HashMap::new();
 
-        // Path and Filename Completion
+        // 2. Path and Filename Completion
         let (search_dir, dir_path_str, prefix) = if let Some(last_slash_idx) = word.rfind('/') {
             let (d, p) = word.split_at(last_slash_idx + 1);
             (d, d, p)
@@ -45,15 +45,17 @@ impl Completer for ShellHelper {
                     if name.starts_with(prefix) {
                         let is_dir = entry.file_type().map(|ft| ft.is_dir()).unwrap_or(false);
 
+                        // display: Show directories with a trailing /, files with no trailing char
+                        let mut display = name.to_string();
+                        // replacement: includes the directory context
                         let mut replacement = dir_path_str.to_string();
                         replacement.push_str(name);
 
-                        let display = replacement.clone();
-
                         if is_dir {
-                            replacement.push('/');
+                            display.push('/');
+                            replacement.push('/'); // No trailing space for directories
                         } else {
-                            replacement.push(' ');
+                            replacement.push(' '); // Trailing space for files
                         }
 
                         unique_matches.insert(
@@ -68,17 +70,16 @@ impl Completer for ShellHelper {
             }
         }
 
-        // Command Completion (Only for the first word and if not a path)
+        // 3. Command Completion (Only for the first word and if not a path)
         if start == 0 && !word.contains('/') {
             // Check Builtins
             for b in &self.builtins {
                 if b.starts_with(word) {
-                    let replacement = format!("{} ", b);
                     unique_matches.insert(
-                        replacement.clone(),
+                        format!("{} ", b),
                         Pair {
                             display: b.clone(),
-                            replacement,
+                            replacement: format!("{} ", b),
                         },
                     );
                 }
@@ -92,12 +93,11 @@ impl Completer for ShellHelper {
                             let path = entry.path();
                             if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
                                 if name.starts_with(word) && path.is_executable() {
-                                    let replacement = format!("{} ", name);
                                     unique_matches.insert(
-                                        replacement.clone(),
+                                        format!("{} ", name),
                                         Pair {
                                             display: name.to_string(),
-                                            replacement,
+                                            replacement: format!("{} ", name),
                                         },
                                     );
                                 }
@@ -108,8 +108,8 @@ impl Completer for ShellHelper {
             }
         }
 
-        // Convert the HashMap values into a sorted Vec of Pairs
         let mut candidates: Vec<Pair> = unique_matches.into_values().collect();
+        // Alpha-sort as required
         candidates.sort_by(|a, b| a.display.cmp(&b.display));
 
         Ok((start, candidates))
