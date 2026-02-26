@@ -41,31 +41,31 @@ impl Completer for ShellHelper {
 
         if let Ok(entries) = fs::read_dir(search_dir) {
             for entry in entries.flatten() {
-                if let Some(name) = entry.file_name().to_str() {
-                    if name.starts_with(prefix) {
-                        let is_dir = entry.file_type().map(|ft| ft.is_dir()).unwrap_or(false);
+                if let Some(name) = entry.file_name().to_str()
+                    && name.starts_with(prefix)
+                {
+                    let is_dir = entry.file_type().map(|ft| ft.is_dir()).unwrap_or(false);
 
-                        // display: Show directories with a trailing /, files with no trailing char
-                        let mut display = name.to_string();
-                        // replacement: includes the directory context
-                        let mut replacement = dir_path_str.to_string();
-                        replacement.push_str(name);
+                    // display: Show directories with a trailing /, files with no trailing char
+                    let mut display = name.to_string();
+                    // replacement: includes the directory context
+                    let mut replacement = dir_path_str.to_string();
+                    replacement.push_str(name);
 
-                        if is_dir {
-                            display.push('/');
-                            replacement.push('/'); // No trailing space for directories
-                        } else {
-                            replacement.push(' '); // Trailing space for files
-                        }
-
-                        unique_matches.insert(
-                            replacement.clone(),
-                            Pair {
-                                display,
-                                replacement,
-                            },
-                        );
+                    if is_dir {
+                        display.push('/');
+                        replacement.push('/'); // No trailing space for directories
+                    } else {
+                        replacement.push(' '); // Trailing space for files
                     }
+
+                    unique_matches.insert(
+                        replacement.clone(),
+                        Pair {
+                            display,
+                            replacement,
+                        },
+                    );
                 }
             }
         }
@@ -91,16 +91,17 @@ impl Completer for ShellHelper {
                     if let Ok(entries) = fs::read_dir(dir) {
                         for entry in entries.flatten() {
                             let path = entry.path();
-                            if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
-                                if name.starts_with(word) && path.is_executable() {
-                                    unique_matches.insert(
-                                        format!("{} ", name),
-                                        Pair {
-                                            display: name.to_string(),
-                                            replacement: format!("{} ", name),
-                                        },
-                                    );
-                                }
+                            if let Some(name) = path.file_name().and_then(|n| n.to_str())
+                                && name.starts_with(word)
+                                && path.is_executable()
+                            {
+                                unique_matches.insert(
+                                    format!("{} ", name),
+                                    Pair {
+                                        display: name.to_string(),
+                                        replacement: format!("{} ", name),
+                                    },
+                                );
                             }
                         }
                     }

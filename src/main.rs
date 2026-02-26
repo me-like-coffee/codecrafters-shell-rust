@@ -30,13 +30,13 @@ fn main() -> Result<()> {
     rl.set_helper(Some(helper));
 
     let mut history_list = Vec::new();
-    if let Ok(hf) = env::var("HISTFILE") {
-        if let Ok(c) = fs::read_to_string(&hf) {
-            for l in c.lines() {
-                if !l.trim().is_empty() {
-                    let _ = rl.add_history_entry(l.trim());
-                    history_list.push(l.trim().to_string());
-                }
+    if let Ok(hf) = env::var("HISTFILE")
+        && let Ok(c) = fs::read_to_string(&hf)
+    {
+        for l in c.lines() {
+            if !l.trim().is_empty() {
+                let _ = rl.add_history_entry(l.trim());
+                history_list.push(l.trim().to_string());
             }
         }
     }
@@ -96,11 +96,11 @@ fn main() -> Result<()> {
         }
     }
 
-    if let Ok(hf) = env::var("HISTFILE") {
-        if let Ok(mut f) = File::create(hf) {
-            for e in &history_list {
-                let _ = writeln!(f, "{}", e);
-            }
+    if let Ok(hf) = env::var("HISTFILE")
+        && let Ok(mut f) = File::create(hf)
+    {
+        for e in &history_list {
+            let _ = writeln!(f, "{}", e);
         }
     }
     Ok(())

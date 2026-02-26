@@ -28,24 +28,24 @@ pub fn parse_stage(tokens: Vec<String>) -> Result<CommandStage> {
         let is_stderr = matches!(token.as_str(), "2>" | "2>>");
         let is_append = matches!(token.as_str(), ">>" | "1>>" | "2>>");
 
-        if is_stdout || is_stderr {
-            if let Some(filename) = tokens.get(i + 1) {
-                let mut options = OpenOptions::new();
-                options.write(true).create(true);
-                if is_append {
-                    options.append(true);
-                } else {
-                    options.truncate(true);
-                }
-                let file = options.open(filename).context("file open error")?;
-                if is_stderr {
-                    stderr_file = Some(file);
-                } else {
-                    stdout_file = Some(file);
-                }
-                i += 2;
-                continue;
+        if (is_stdout || is_stderr)
+            && let Some(filename) = tokens.get(i + 1)
+        {
+            let mut options = OpenOptions::new();
+            options.write(true).create(true);
+            if is_append {
+                options.append(true);
+            } else {
+                options.truncate(true);
             }
+            let file = options.open(filename).context("file open error")?;
+            if is_stderr {
+                stderr_file = Some(file);
+            } else {
+                stdout_file = Some(file);
+            }
+            i += 2;
+            continue;
         }
         clean_args.push(tokens[i].clone());
         i += 1;

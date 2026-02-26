@@ -37,12 +37,12 @@ pub fn run_builtin(
             let flag = args.first().map(|s| s.as_str());
             match flag {
                 Some("-r") => {
-                    if let Some(p) = args.get(1) {
-                        if let Ok(c) = fs::read_to_string(p) {
-                            for l in c.lines() {
-                                if !l.trim().is_empty() {
-                                    hist.push(l.trim().to_string());
-                                }
+                    if let Some(p) = args.get(1)
+                        && let Ok(c) = fs::read_to_string(p)
+                    {
+                        for l in c.lines() {
+                            if !l.trim().is_empty() {
+                                hist.push(l.trim().to_string());
                             }
                         }
                     }
