@@ -24,6 +24,7 @@ fn main() -> Result<()> {
             "pwd".into(),
             "cd".into(),
             "history".into(),
+            "jobs".into(),
         ],
     };
     let mut rl = Editor::with_config(config)?;

@@ -10,6 +10,7 @@ enum InputSource {
     Buffer(Vec<u8>),
 }
 
+#[derive(Debug)]
 pub struct CommandStage {
     pub tokens: Vec<String>,
     pub stdout_file: Option<File>,
@@ -77,6 +78,8 @@ pub fn execute_pipeline(
     let mut prev_input = InputSource::Terminal;
     let mut children = Vec::new();
     let n_stages = stages.len();
+
+println!("{:?}", stages);
 
     for i in 0..n_stages {
         let mut stage = stages.remove(0);
