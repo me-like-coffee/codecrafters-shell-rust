@@ -6,7 +6,7 @@ use std::io::Write;
 use std::path::PathBuf;
 
 pub fn is_builtin(cmd: &str) -> bool {
-    matches!(cmd, "exit" | "echo" | "type" | "pwd" | "cd" | "history")
+    matches!(cmd, "exit" | "echo" | "type" | "pwd" | "cd" | "history" | "jobs")
 }
 
 pub fn run_builtin(
@@ -79,6 +79,9 @@ pub fn run_builtin(
                     }
                 }
             }
+        }
+        "jobs" => {
+            // writeln!(out, " ")?;
         }
         "pwd" => {
             writeln!(out, "{}", env::current_dir()?.display())?;
