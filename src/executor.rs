@@ -79,8 +79,6 @@ pub fn execute_pipeline(
     let mut children = Vec::new();
     let n_stages = stages.len();
 
-println!("{:?}", stages);
-
     for i in 0..n_stages {
         let mut stage = stages.remove(0);
         if stage.tokens.is_empty() {

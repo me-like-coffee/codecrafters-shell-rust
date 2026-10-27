@@ -6,7 +6,10 @@ use std::io::Write;
 use std::path::PathBuf;
 
 pub fn is_builtin(cmd: &str) -> bool {
-    matches!(cmd, "exit" | "echo" | "type" | "pwd" | "cd" | "history" | "jobs")
+    matches!(
+        cmd,
+        "exit" | "echo" | "type" | "pwd" | "cd" | "history" | "jobs"
+    )
 }
 
 pub fn run_builtin(
