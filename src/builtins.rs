@@ -86,7 +86,22 @@ pub fn run_builtin(
             }
         }
         "jobs" => {
-            // writeln!(out, " ")?;
+            let n = shell.jobs.len();
+            for (i, job) in shell.jobs.iter().enumerate() {
+                // '+' = most recent job, '-' = the one before it, ' ' = older
+                let marker = if i + 1 == n {
+                    '+'
+                } else if i + 2 == n {
+                    '-'
+                } else {
+                    ' '
+                };
+                writeln!(
+                    out,
+                    "[{}]{}  {:<24}{} &",
+                    job.id, marker, "Running", job.command
+                )?;
+            }
         }
         "pwd" => {
             writeln!(out, "{}", env::current_dir()?.display())?;
