@@ -39,7 +39,11 @@ impl Completer for ShellHelper {
 
             let script = self.completions.borrow().get(cmd).cloned();
             if let Some(script) = script {
-                let output = Command::new(&script).args([cmd, word, prev]).output();
+                let output = Command::new(&script)
+                    .args([cmd, word, prev])
+                    .env("COMP_LINE", line)
+                    .env("COMP_POINT", pos.to_string())
+                    .output();
                 let mut candidates = Vec::new();
                 if let Ok(out) = output {
                     for l in String::from_utf8_lossy(&out.stdout).lines() {
