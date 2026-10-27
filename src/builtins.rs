@@ -33,7 +33,13 @@ pub fn run_builtin(
                 writeln!(err, "cd: {}: No such file or directory", target)?;
             }
         }
-        "complete" => {}
+        "complete" => {
+            if args.first().map(|s| s.as_str()) == Some("-p") {
+                if let Some(name) = args.get(1) {
+                    writeln!(out, "complete: {}: no completion specification", name)?;
+                }
+            }            
+        }
         "declare" => {}
         "echo" => {
             writeln!(out, "{}", args.join(" "))?;
