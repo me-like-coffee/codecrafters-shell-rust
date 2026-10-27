@@ -33,10 +33,13 @@ impl Completer for ShellHelper {
 
         // Programmable completion: only for arguments, not the command name
         if start > 0 {
-            let cmd = line.split_whitespace().next().unwrap_or("");
+            let before = slice[..start].split_whitespace();
+            let cmd = before.clone().next().unwrap_or("");
+            let prev = before.last().unwrap_or("");
+
             let script = self.completions.borrow().get(cmd).cloned();
             if let Some(script) = script {
-                let output = Command::new(&script).output();
+                let output = Command::new(&script).args([cmd, word, prev]).output();
                 let mut candidates = Vec::new();
                 if let Ok(out) = output {
                     for l in String::from_utf8_lossy(&out.stdout).lines() {

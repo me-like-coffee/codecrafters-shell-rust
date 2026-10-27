@@ -8,6 +8,7 @@ mod utils;
 use anyhow::Result;
 use builtins::BUILTINS;
 use editor::ShellHelper;
+use rustyline::config::BellStyle;
 use rustyline::error::ReadlineError;
 use rustyline::{CompletionType, Config, Editor};
 use shell::Shell;
@@ -19,6 +20,7 @@ use std::io::Write;
 fn main() -> Result<()> {
     let config = Config::builder()
         .completion_type(CompletionType::List)
+        .bell_style(BellStyle::Audible)
         .build();
 
     let mut shell = Shell::default();
