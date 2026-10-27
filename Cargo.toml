@@ -3,11 +3,11 @@ name = "codecrafters-shell"
 version = "0.1.0"
 authors = ["Codecrafters <hello@codecrafters.io>"]
 edition = "2024"
-rust-version = "1.94"
+rust-version = "1.93"
 
 [dependencies]
 anyhow = "1.0.104"
 dirs = "7.0.0"
 is_executable = "1.0.6"
 nom = "8.0.0"
-rustyline = "19.0.0"
+rustyline = "17.0.2"

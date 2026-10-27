@@ -1,3 +1,4 @@
+use crate::shell::Shell;
 use crate::utils::find_exe_path;
 use anyhow::{Context, Result};
 use std::env;
@@ -5,11 +6,10 @@ use std::fs::{self, File, OpenOptions};
 use std::io::Write;
 use std::path::PathBuf;
 
+pub const BUILTINS: &[&str] = &["exit", "echo", "type", "pwd", "cd", "history", "jobs"];
+
 pub fn is_builtin(cmd: &str) -> bool {
-    matches!(
-        cmd,
-        "exit" | "echo" | "type" | "pwd" | "cd" | "history" | "jobs"
-    )
+    BUILTINS.contains(&cmd)
 }
 
 pub fn run_builtin(
@@ -17,8 +17,7 @@ pub fn run_builtin(
     args: &[String],
     out: &mut dyn Write,
     err: &mut dyn Write,
-    hist: &mut Vec<String>,
-    sync_idx: &mut usize,
+    shell: &mut Shell,
 ) -> Result<()> {
     match cmd {
         "echo" => {
@@ -45,7 +44,7 @@ pub fn run_builtin(
                     {
                         for l in c.lines() {
                             if !l.trim().is_empty() {
-                                hist.push(l.trim().to_string());
+                                shell.history.push(l.trim().to_string());
                             }
                         }
                     }
@@ -53,30 +52,31 @@ pub fn run_builtin(
                 Some("-w") => {
                     if let Some(p) = args.get(1) {
                         let mut f = File::create(p)?;
-                        for e in hist.iter() {
+                        for e in shell.history.iter() {
                             writeln!(f, "{}", e)?;
                         }
-                        *sync_idx = hist.len();
+                        shell.sync_idx = shell.history.len();
                     }
                 }
                 Some("-a") => {
                     if let Some(p) = args.get(1) {
                         let mut f = OpenOptions::new().create(true).append(true).open(p)?;
-                        for e in &hist[*sync_idx..] {
+                        for e in &shell.history[shell.sync_idx..] {
                             writeln!(f, "{}", e)?;
                         }
-                        *sync_idx = hist.len();
+                        shell.sync_idx = shell.history.len();
                     }
                 }
                 _ => {
                     let limit = args
                         .first()
                         .and_then(|s| s.parse::<usize>().ok())
-                        .unwrap_or(hist.len());
-                    for (i, e) in hist
+                        .unwrap_or(shell.history.len());
+                    for (i, e) in shell
+                        .history
                         .iter()
                         .enumerate()
-                        .skip(hist.len().saturating_sub(limit))
+                        .skip(shell.history.len().saturating_sub(limit))
                     {
                         writeln!(out, "{:>5}  {}", i + 1, e)?;
                     }

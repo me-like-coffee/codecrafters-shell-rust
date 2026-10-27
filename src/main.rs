@@ -2,12 +2,16 @@ mod builtins;
 mod editor;
 mod executor;
 mod parser;
+mod shell;
 mod utils;
 
 use anyhow::Result;
+use builtins::BUILTINS;
 use editor::ShellHelper;
 use rustyline::error::ReadlineError;
 use rustyline::{CompletionType, Config, Editor};
+use shell::Shell;
+
 use std::env;
 use std::fs::{self, File};
 use std::io::Write;
@@ -17,31 +21,23 @@ fn main() -> Result<()> {
         .completion_type(CompletionType::List)
         .build();
     let helper = ShellHelper {
-        builtins: vec![
-            "echo".into(),
-            "exit".into(),
-            "type".into(),
-            "pwd".into(),
-            "cd".into(),
-            "history".into(),
-            "jobs".into(),
-        ],
+        builtins: BUILTINS.iter().map(|s| s.to_string()).collect(),
     };
     let mut rl = Editor::with_config(config)?;
     rl.set_helper(Some(helper));
 
-    let mut history_list = Vec::new();
+    let mut shell = Shell::default();
     if let Ok(hf) = env::var("HISTFILE")
         && let Ok(c) = fs::read_to_string(&hf)
     {
         for l in c.lines() {
             if !l.trim().is_empty() {
                 let _ = rl.add_history_entry(l.trim());
-                history_list.push(l.trim().to_string());
+                shell.history.push(l.trim().to_string());
             }
         }
     }
-    let mut history_sync_idx = history_list.len();
+    shell.sync_idx = shell.history.len();
 
     loop {
         match rl.readline("$ ") {
@@ -51,9 +47,9 @@ fn main() -> Result<()> {
                     continue;
                 }
                 let _ = rl.add_history_entry(trimmed);
-                history_list.push(trimmed.to_string());
+                shell.history.push(trimmed.to_string());
 
-                let tokens = match parser::tokenize(&input) {
+                let mut tokens = match parser::tokenize(&input) {
                     Ok(t) => t,
                     Err(e) => {
                         eprintln!("{}", e);
@@ -61,6 +57,13 @@ fn main() -> Result<()> {
                     }
                 };
 
+                // Detect and strip a trailing `&` (background execution)
+                let background = tokens.last().map(|s| s.as_str()) == Some("&");
+                if background {
+                    tokens.pop();
+                }
+
+                // Split tokens into pipeline stages on `|`
                 let mut stages_tokens = Vec::new();
                 let mut current_chunk = Vec::new();
                 for token in tokens {
@@ -72,19 +75,27 @@ fn main() -> Result<()> {
                 }
                 stages_tokens.push(current_chunk);
 
-                let mut stages = Vec::new();
-                for st in stages_tokens {
-                    stages.push(executor::parse_stage(st)?);
-                }
+                // Abort the whole line if any stage fails to parse
+                let stages: Result<Vec<_>> = stages_tokens
+                    .into_iter()
+                    .map(executor::parse_stage)
+                    .collect();
+                let stages = match stages {
+                    Ok(s) => s,
+                    Err(e) => {
+                        eprintln!("{e}");
+                        continue;
+                    }
+                };
 
                 if stages.len() == 1 && stages[0].tokens.first().map(|s| s.as_str()) == Some("exit")
                 {
                     break;
                 }
 
-                if let Err(e) =
-                    executor::execute_pipeline(stages, &mut history_list, &mut history_sync_idx)
-                {
+                // Original command text without the trailing `&`, for the jobs listing
+                let text = trimmed.trim_end_matches('&').trim_end();
+                if let Err(e) = executor::execute_pipeline(stages, &mut shell, background, text) {
                     eprintln!("{}", e);
                 }
             }
@@ -100,7 +111,7 @@ fn main() -> Result<()> {
     if let Ok(hf) = env::var("HISTFILE")
         && let Ok(mut f) = File::create(hf)
     {
-        for e in &history_list {
+        for e in &shell.history {
             let _ = writeln!(f, "{}", e);
         }
     }

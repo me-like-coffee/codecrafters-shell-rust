@@ -1,4 +1,5 @@
 use crate::builtins::{is_builtin, run_builtin};
+use crate::shell::Shell;
 use anyhow::{Context, Result};
 use std::fs::{File, OpenOptions};
 use std::io::{self, Read, Write};
@@ -72,8 +73,9 @@ fn create_pipe_from_data(data: Vec<u8>) -> Result<Stdio> {
 
 pub fn execute_pipeline(
     mut stages: Vec<CommandStage>,
-    history: &mut Vec<String>,
-    sync_idx: &mut usize,
+    shell: &mut Shell,
+    _background: bool,
+    _text: &str,
 ) -> Result<()> {
     let mut prev_input = InputSource::Terminal;
     let mut children = Vec::new();
@@ -98,14 +100,7 @@ pub fn execute_pipeline(
                 Some(f) => f,
                 None => &mut std_err,
             };
-            run_builtin(
-                &command,
-                &stage.tokens,
-                &mut builtin_out,
-                err_writer,
-                history,
-                sync_idx,
-            )?;
+            run_builtin(&command, &stage.tokens, &mut builtin_out, err_writer, shell)?;
             if is_last {
                 if let Some(mut f) = stage.stdout_file {
                     f.write_all(&builtin_out)?;
