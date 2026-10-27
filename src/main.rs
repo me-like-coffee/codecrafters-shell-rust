@@ -40,6 +40,11 @@ fn main() -> Result<()> {
     shell.sync_idx = shell.history.len();
 
     loop {
+        for line in shell.job_lines(false) {
+            println!("{}", line);
+        }
+        let _ = std::io::stdout().flush();
+
         match rl.readline("$ ") {
             Ok(input) => {
                 let trimmed = input.trim();

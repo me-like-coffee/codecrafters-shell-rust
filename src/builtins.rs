@@ -86,45 +86,9 @@ pub fn run_builtin(
             }
         }
         "jobs" => {
-            // Poll every job; a job is done when all its children have exited.
-            let done: Vec<bool> = shell
-                .jobs
-                .iter_mut()
-                .map(|job| {
-                    job.children
-                        .iter_mut()
-                        .all(|c| matches!(c.try_wait(), Ok(Some(_)) | Err(_)))
-                })
-                .collect();
-
-            // Print using the same marker logic as before, based on the full list.
-            let n = shell.jobs.len();
-            for (i, job) in shell.jobs.iter().enumerate() {
-                let marker = if i + 1 == n {
-                    '+'
-                } else if i + 2 == n {
-                    '-'
-                } else {
-                    ' '
-                };
-                if done[i] {
-                    writeln!(out, "[{}]{}  {:<24}{}", job.id, marker, "Done", job.command)?;
-                } else {
-                    writeln!(
-                        out,
-                        "[{}]{}  {:<24}{} &",
-                        job.id, marker, "Running", job.command
-                    )?;
-                }
+            for line in shell.job_lines(true) {
+                writeln!(out, "{}", line)?;
             }
-
-            // Drop the finished jobs so the next `jobs` call doesn't show them.
-            let mut i = 0;
-            shell.jobs.retain(|_| {
-                let keep = !done[i];
-                i += 1;
-                keep
-            });
         }
         "pwd" => {
             writeln!(out, "{}", env::current_dir()?.display())?;
