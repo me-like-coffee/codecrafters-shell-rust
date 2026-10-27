@@ -9,9 +9,12 @@ use nom::{
 };
 use std::collections::HashMap;
 
+use crate::utils::{is_ident_char, is_ident_start};
+
 #[derive(Debug, Clone)]
 enum Part {
     Lit(String),
+    Quoted(String),
     Var(String),
 }
 
@@ -24,11 +27,7 @@ fn lit(s: impl Into<String>) -> Vec<Part> {
 /// Returns the matched name as a slice of the input. Shared by `$name`
 /// and `${name}` so both forms accept exactly the same names.
 fn parse_ident(input: &str) -> IResult<&str, &str> {
-    recognize(pair(
-        satisfy(|c| c.is_ascii_alphabetic() || c == '_'),
-        take_while(|c: char| c.is_ascii_alphanumeric() || c == '_'),
-    ))
-    .parse(input)
+    recognize(pair(satisfy(is_ident_start), take_while(is_ident_char))).parse(input)
 }
 
 /// `$name`, where name is [A-Za-z_][A-Za-z0-9_]*
@@ -36,10 +35,7 @@ fn parse_var(input: &str) -> IResult<&str, Vec<Part>> {
     map(
         preceded(
             char('$'),
-            alt((
-                delimited(char('{'), parse_ident, char('}')),
-                parse_ident,
-            )),
+            alt((delimited(char('{'), parse_ident, char('}')), parse_ident)),
         ),
         |name: &str| vec![Part::Var(name.to_string())],
     )
@@ -56,7 +52,9 @@ fn parse_lone_dollar(input: &str) -> IResult<&str, Vec<Part>> {
 fn parse_single_quoted(input: &str) -> IResult<&str, Vec<Part>> {
     delimited(
         char('\''),
-        map(take_while(|c| c != '\''), |s: &str| lit(s)),
+        map(take_while(|c| c != '\''), |s: &str| {
+            vec![Part::Quoted(s.to_string())]
+        }),
         char('\''),
     )
     .parse(input)
@@ -77,7 +75,11 @@ fn parse_double_quoted(input: &str) -> IResult<&str, Vec<Part>> {
                 parse_lone_dollar,
                 map(is_not("\"\\$"), |s: &str| lit(s)),
             ))),
-            |v| v.into_iter().flatten().collect(),
+            |v| {
+                let mut parts: Vec<Part> = v.into_iter().flatten().collect();
+                parts.push(Part::Quoted(String::new()));
+                parts
+            },
         ),
         char('"'),
     )
@@ -86,7 +88,11 @@ fn parse_double_quoted(input: &str) -> IResult<&str, Vec<Part>> {
 
 /// Parses a backslash followed by any character outside of quotes.
 fn parse_escaped_outside_quotes(input: &str) -> IResult<&str, Vec<Part>> {
-    preceded(char('\\'), map(anychar, lit)).parse(input)
+    preceded(
+        char('\\'),
+        map(anychar, |c| vec![Part::Quoted(c.to_string())]),
+    )
+    .parse(input)
 }
 
 /// Parses a plain string fragment (no quotes, no whitespace, no backslash)
@@ -128,18 +134,20 @@ pub fn tokenize(input: &str, vars: &HashMap<String, String>) -> anyhow::Result<V
         .map_err(|e| anyhow::anyhow!("Invalid syntax: {}", e))?;
     Ok(words
         .into_iter()
-        .map(|parts| {
-            parts
+        .filter_map(|parts| {
+            let keep = parts.iter().any(|p| !matches!(p, Part::Var(_)));
+            let s: String = parts
                 .into_iter()
                 .map(|p| match p {
-                    Part::Lit(s) => s,
+                    Part::Lit(s) | Part::Quoted(s) => s,
                     Part::Var(name) => vars
                         .get(&name)
                         .cloned()
                         .or_else(|| std::env::var(&name).ok())
                         .unwrap_or_default(),
                 })
-                .collect::<String>()
+                .collect();
+            if s.is_empty() && !keep { None } else { Some(s) }
         })
         .collect())
 }
