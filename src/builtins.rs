@@ -60,12 +60,18 @@ pub fn run_builtin(
             _ => {}
         },
         "declare" => {
-            if args.first().map(|s| s.as_str()) == Some("-p")
-                && let Some(name) = args.get(1)
-            {
-                match shell.vars.get(name) {
-                    Some(value) => writeln!(out, "declare -- {}=\"{}\"", name, value)?,
-                    None => writeln!(out, "declare: {}: not found", name)?,
+            if args.first().map(|s| s.as_str()) == Some("-p") {
+                if let Some(name) = args.get(1) {
+                    match shell.vars.get(name) {
+                        Some(value) => writeln!(out, "declare -- {}=\"{}\"", name, value)?,
+                        None => writeln!(out, "declare: {}: not found", name)?,
+                    }
+                }
+            } else {
+                for arg in args {
+                    if let Some((name, value)) = arg.split_once('=') {
+                        shell.vars.insert(name.to_string(), value.to_string());
+                    }
                 }
             }
         }
