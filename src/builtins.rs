@@ -7,7 +7,7 @@ use std::io::Write;
 use std::path::PathBuf;
 
 pub const BUILTINS: &[&str] = &[
-    "cd", "declare", "echo", "exit", "history", "jobs", "pwd", "type",
+    "cd", "complete", "declare", "echo", "exit", "history", "jobs", "pwd", "type",
 ];
 
 pub fn is_builtin(cmd: &str) -> bool {
@@ -33,6 +33,7 @@ pub fn run_builtin(
                 writeln!(err, "cd: {}: No such file or directory", target)?;
             }
         }
+        "complete" => {}
         "declare" => {}
         "echo" => {
             writeln!(out, "{}", args.join(" "))?;
