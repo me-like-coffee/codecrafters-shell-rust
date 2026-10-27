@@ -52,6 +52,11 @@ pub fn run_builtin(
                     }
                 }
             }
+            Some("-r") => {
+                if let Some(name) = args.get(1) {
+                    shell.completions.borrow_mut().remove(name);
+                }
+            }
             _ => {}
         },
         "declare" => {}
