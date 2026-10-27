@@ -20,13 +20,15 @@ fn main() -> Result<()> {
     let config = Config::builder()
         .completion_type(CompletionType::List)
         .build();
+
+    let mut shell = Shell::default();
     let helper = ShellHelper {
         builtins: BUILTINS.iter().map(|s| s.to_string()).collect(),
+        completions: shell.completions.clone(),
     };
     let mut rl = Editor::with_config(config)?;
     rl.set_helper(Some(helper));
 
-    let mut shell = Shell::default();
     if let Ok(hf) = env::var("HISTFILE")
         && let Ok(c) = fs::read_to_string(&hf)
     {

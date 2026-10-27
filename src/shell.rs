@@ -1,7 +1,7 @@
-use std::collections::HashMap;
-use std::process::Child;
+use std::{cell::RefCell, collections::HashMap, process::Child, rc::Rc};
 
-#[allow(dead_code)]
+pub type Completions = Rc<RefCell<HashMap<String, String>>>;
+
 pub struct Job {
     pub id: usize,
     pub command: String,
@@ -14,7 +14,7 @@ pub struct Shell {
     pub sync_idx: usize,
     pub jobs: Vec<Job>,
     pub _vars: HashMap<String, String>,
-    pub completions: HashMap<String, String>, // command -> script path
+    pub completions: Completions, // command -> script path
 }
 
 impl Shell {

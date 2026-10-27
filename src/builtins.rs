@@ -36,14 +36,17 @@ pub fn run_builtin(
         "complete" => match args.first().map(|s| s.as_str()) {
             Some("-C") => {
                 if let (Some(script), Some(cmd)) = (args.get(1), args.get(2)) {
-                    shell.completions.insert(cmd.clone(), script.clone());
+                    shell
+                        .completions
+                        .borrow_mut()
+                        .insert(cmd.clone(), script.clone());
                 } else {
                     writeln!(err, "complete: -C: option requires an argument")?;
                 }
             }
             Some("-p") => {
                 if let Some(name) = args.get(1) {
-                    match shell.completions.get(name) {
+                    match shell.completions.borrow().get(name) {
                         Some(script) => writeln!(out, "complete -C '{}' {}", script, name)?,
                         None => writeln!(out, "complete: {}: no completion specification", name)?,
                     }

@@ -1,3 +1,4 @@
+use crate::shell::Completions;
 use is_executable::IsExecutable;
 use rustyline::completion::{Completer, Pair};
 use rustyline::error::ReadlineError;
@@ -8,9 +9,11 @@ use rustyline::{Context as RlContext, Helper};
 use std::collections::HashMap;
 use std::env;
 use std::fs;
+use std::process::Command;
 
 pub struct ShellHelper {
     pub builtins: Vec<String>,
+    pub completions: Completions,
 }
 
 impl Completer for ShellHelper {
@@ -24,14 +27,36 @@ impl Completer for ShellHelper {
     ) -> Result<(usize, Vec<Pair>), ReadlineError> {
         let slice = &line[..pos];
 
-        // 1. Identify the start of the word being completed (last space)
+        // Identify the start of the word being completed (last space)
         let start = slice.rfind(' ').map(|i| i + 1).unwrap_or(0);
         let word = &slice[start..];
+
+        // Programmable completion: only for arguments, not the command name
+        if start > 0 {
+            let cmd = line.split_whitespace().next().unwrap_or("");
+            let script = self.completions.borrow().get(cmd).cloned();
+            if let Some(script) = script {
+                let output = Command::new(&script).output();
+                let mut candidates = Vec::new();
+                if let Ok(out) = output {
+                    for l in String::from_utf8_lossy(&out.stdout).lines() {
+                        let l = l.trim();
+                        if !l.is_empty() {
+                            candidates.push(Pair {
+                                display: l.to_string(),
+                                replacement: format!("{} ", l),
+                            });
+                        }
+                    }
+                }
+                return Ok((start, candidates));
+            }
+        }
 
         // Key: Replacement String, Value: Pair object
         let mut unique_matches = HashMap::new();
 
-        // 2. Path and Filename Completion
+        // Path and Filename Completion
         let (search_dir, dir_path_str, prefix) = if let Some(last_slash_idx) = word.rfind('/') {
             let (d, p) = word.split_at(last_slash_idx + 1);
             (d, d, p)
@@ -70,7 +95,7 @@ impl Completer for ShellHelper {
             }
         }
 
-        // 3. Command Completion (Only for the first word and if not a path)
+        // Command Completion (Only for the first word and if not a path)
         if start == 0 && !word.contains('/') {
             // Check Builtins
             for b in &self.builtins {
