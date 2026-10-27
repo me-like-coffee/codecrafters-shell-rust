@@ -58,7 +58,7 @@ fn main() -> Result<()> {
                 let _ = rl.add_history_entry(trimmed);
                 shell.history.push(trimmed.to_string());
 
-                let mut tokens = match parser::tokenize(&input) {
+                let mut tokens = match parser::tokenize(&input, &shell.vars) {
                     Ok(t) => t,
                     Err(e) => {
                         eprintln!("{}", e);
