@@ -14,6 +14,15 @@ pub fn is_builtin(cmd: &str) -> bool {
     BUILTINS.contains(&cmd)
 }
 
+fn is_valid_identifier(name: &str) -> bool {
+    let mut chars = name.chars();
+    match chars.next() {
+        Some(c) if c.is_ascii_alphabetic() || c == '_' => {}
+        _ => return false,
+    }
+    chars.all(|c| c.is_ascii_alphanumeric() || c == '_')
+}
+
 pub fn run_builtin(
     cmd: &str,
     args: &[String],
@@ -69,6 +78,11 @@ pub fn run_builtin(
                 }
             } else {
                 for arg in args {
+                    let name = arg.split_once('=').map(|(n, _)| n).unwrap_or(arg);
+                    if !is_valid_identifier(name) {
+                        writeln!(err, "declare: `{}': not a valid identifier", arg)?;
+                        continue;
+                    }
                     if let Some((name, value)) = arg.split_once('=') {
                         shell.vars.insert(name.to_string(), value.to_string());
                     }
