@@ -56,6 +56,8 @@ impl Completer for ShellHelper {
                         }
                     }
                 }
+                candidates.sort_by(|a, b| a.display.cmp(&b.display));
+                candidates.dedup_by(|a, b| a.display == b.display);
                 return Ok((start, candidates));
             }
         }
