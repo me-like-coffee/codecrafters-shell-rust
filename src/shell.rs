@@ -13,7 +13,7 @@ pub struct Shell {
     pub history: Vec<String>,
     pub sync_idx: usize,
     pub jobs: Vec<Job>,
-    pub _vars: HashMap<String, String>,
+    pub vars: HashMap<String, String>,
     pub completions: Completions, // command -> script path
 }
 
