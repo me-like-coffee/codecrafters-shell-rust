@@ -19,14 +19,26 @@ fn lit(s: impl Into<String>) -> Vec<Part> {
     vec![Part::Lit(s.into())]
 }
 
+/// Parses a shell identifier: one letter or underscore, followed by any
+/// number of letters, digits, or underscores (`[A-Za-z_][A-Za-z0-9_]*`).
+/// Returns the matched name as a slice of the input. Shared by `$name`
+/// and `${name}` so both forms accept exactly the same names.
+fn parse_ident(input: &str) -> IResult<&str, &str> {
+    recognize(pair(
+        satisfy(|c| c.is_ascii_alphabetic() || c == '_'),
+        take_while(|c: char| c.is_ascii_alphanumeric() || c == '_'),
+    ))
+    .parse(input)
+}
+
 /// `$name`, where name is [A-Za-z_][A-Za-z0-9_]*
 fn parse_var(input: &str) -> IResult<&str, Vec<Part>> {
     map(
         preceded(
             char('$'),
-            recognize(pair(
-                satisfy(|c| c.is_ascii_alphabetic() || c == '_'),
-                take_while(|c: char| c.is_ascii_alphanumeric() || c == '_'),
+            alt((
+                delimited(char('{'), parse_ident, char('}')),
+                parse_ident,
             )),
         ),
         |name: &str| vec![Part::Var(name.to_string())],
