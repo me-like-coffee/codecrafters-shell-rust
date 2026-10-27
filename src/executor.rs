@@ -1,5 +1,5 @@
 use crate::builtins::{is_builtin, run_builtin};
-use crate::shell::Shell;
+use crate::shell::{Job, Shell};
 use anyhow::{Context, Result};
 use std::fs::{File, OpenOptions};
 use std::io::{self, Read, Write};
@@ -74,8 +74,8 @@ fn create_pipe_from_data(data: Vec<u8>) -> Result<Stdio> {
 pub fn execute_pipeline(
     mut stages: Vec<CommandStage>,
     shell: &mut Shell,
-    _background: bool,
-    _text: &str,
+    background: bool,
+    text: &str,
 ) -> Result<()> {
     let mut prev_input = InputSource::Terminal;
     let mut children = Vec::new();
@@ -116,7 +116,11 @@ pub fn execute_pipeline(
             cmd.args(&stage.tokens);
             match prev_input {
                 InputSource::Terminal => {
-                    cmd.stdin(Stdio::inherit());
+                    if background && i == 0 {
+                        cmd.stdin(Stdio::null());
+                    } else {
+                        cmd.stdin(Stdio::inherit());
+                    }
                 }
                 InputSource::Pipe(pipe) => {
                     cmd.stdin(Stdio::from(pipe));
@@ -153,8 +157,21 @@ pub fn execute_pipeline(
             children.push(child);
         }
     }
-    for mut child in children {
-        let _ = child.wait();
+    if background {
+        if let Some(last) = children.last() {
+            let id = shell.next_job_id();
+            println!("[{}] {}", id, last.id());
+            let _ = io::stdout().flush();
+            shell.jobs.push(Job {
+                id,
+                command: text.to_string(),
+                children,
+            });
+        }
+    } else {
+        for mut child in children {
+            let _ = child.wait();
+        }
     }
     Ok(())
 }

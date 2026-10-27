@@ -6,7 +6,9 @@ use std::fs::{self, File, OpenOptions};
 use std::io::Write;
 use std::path::PathBuf;
 
-pub const BUILTINS: &[&str] = &["exit", "echo", "type", "pwd", "cd", "history", "jobs"];
+pub const BUILTINS: &[&str] = &[
+    "cd", "declare", "echo", "exit", "history", "jobs", "pwd", "type",
+];
 
 pub fn is_builtin(cmd: &str) -> bool {
     BUILTINS.contains(&cmd)
@@ -20,21 +22,21 @@ pub fn run_builtin(
     shell: &mut Shell,
 ) -> Result<()> {
     match cmd {
+        "cd" => {
+            let target = args.first().map(|s| s.as_str()).unwrap_or("~");
+            let p = if target == "~" {
+                dirs::home_dir().context("home error")?
+            } else {
+                PathBuf::from(target)
+            };
+            if env::set_current_dir(&p).is_err() {
+                writeln!(err, "cd: {}: No such file or directory", target)?;
+            }
+        }
+        "declare" => {}
         "echo" => {
             writeln!(out, "{}", args.join(" "))?;
         }
-        "type" => match args.first() {
-            Some(target) => {
-                if is_builtin(target) {
-                    writeln!(out, "{} is a shell builtin", target)?;
-                } else if let Some(p) = find_exe_path(target) {
-                    writeln!(out, "{} is {}", target, p.display())?;
-                } else {
-                    writeln!(out, "{}: not found", target)?;
-                }
-            }
-            None => writeln!(err, "type: missing argument")?,
-        },
         "history" => {
             let flag = args.first().map(|s| s.as_str());
             match flag {
@@ -89,17 +91,18 @@ pub fn run_builtin(
         "pwd" => {
             writeln!(out, "{}", env::current_dir()?.display())?;
         }
-        "cd" => {
-            let target = args.first().map(|s| s.as_str()).unwrap_or("~");
-            let p = if target == "~" {
-                dirs::home_dir().context("home error")?
-            } else {
-                PathBuf::from(target)
-            };
-            if env::set_current_dir(&p).is_err() {
-                writeln!(err, "cd: {}: No such file or directory", target)?;
+        "type" => match args.first() {
+            Some(target) => {
+                if is_builtin(target) {
+                    writeln!(out, "{} is a shell builtin", target)?;
+                } else if let Some(p) = find_exe_path(target) {
+                    writeln!(out, "{} is {}", target, p.display())?;
+                } else {
+                    writeln!(out, "{}: not found", target)?;
+                }
             }
-        }
+            None => writeln!(err, "type: missing argument")?,
+        },
         _ => {}
     }
     Ok(())
