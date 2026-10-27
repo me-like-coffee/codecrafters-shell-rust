@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::process::Child;
 
 #[allow(dead_code)]
@@ -7,15 +8,15 @@ pub struct Job {
     pub children: Vec<Child>,
 }
 
-#[allow(dead_code)]
 #[derive(Default)]
 pub struct Shell {
     pub history: Vec<String>,
     pub sync_idx: usize,
     pub jobs: Vec<Job>,
+    pub _vars: HashMap<String, String>,
+    pub completions: HashMap<String, String>, // command -> script path
 }
 
-#[allow(dead_code)]
 impl Shell {
     pub fn next_job_id(&self) -> usize {
         self.jobs.iter().map(|j| j.id).max().unwrap_or(0) + 1

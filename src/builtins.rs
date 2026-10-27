@@ -33,13 +33,24 @@ pub fn run_builtin(
                 writeln!(err, "cd: {}: No such file or directory", target)?;
             }
         }
-        "complete" => {
-            if args.first().map(|s| s.as_str()) == Some("-p") {
-                if let Some(name) = args.get(1) {
-                    writeln!(out, "complete: {}: no completion specification", name)?;
+        "complete" => match args.first().map(|s| s.as_str()) {
+            Some("-C") => {
+                if let (Some(script), Some(cmd)) = (args.get(1), args.get(2)) {
+                    shell.completions.insert(cmd.clone(), script.clone());
+                } else {
+                    writeln!(err, "complete: -C: option requires an argument")?;
                 }
-            }            
-        }
+            }
+            Some("-p") => {
+                if let Some(name) = args.get(1) {
+                    match shell.completions.get(name) {
+                        Some(script) => writeln!(out, "complete -C '{}' {}", script, name)?,
+                        None => writeln!(out, "complete: {}: no completion specification", name)?,
+                    }
+                }
+            }
+            _ => {}
+        },
         "declare" => {}
         "echo" => {
             writeln!(out, "{}", args.join(" "))?;
